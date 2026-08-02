@@ -20,11 +20,21 @@ Why the ROI crop:
   splay channels need -- they have the least angular travel and the least
   tolerance for landmark noise.
 
+Why the preview is NOT mirrored:
+  MediaPipe labels pose landmarks anatomically, from what it sees. Mirroring the
+  frame makes a right arm look like a left one, so landmarks 14/16 stop being
+  your right elbow/wrist and hand chirality inverts along with it. Keeping the
+  frame un-mirrored costs about thirty seconds of feeling weird and removes an
+  entire class of silent sign errors.
+
 Keys:  c = calibrate    s = toggle sending    ESC = quit
 
 Models (not committed -- see README):
   hand_landmarker.task
-  pose_landmarker_full.task
+  pose_landmarker_lite.task
+
+  curl -o pose_landmarker_lite.task \\
+    https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task
 """
 
 import math
@@ -42,7 +52,7 @@ from mediapipe.tasks.python import vision
 # ===========================================================================
 
 HAND_MODEL = "hand_landmarker.task"
-POSE_MODEL = "pose_landmarker_full.task"
+POSE_MODEL = "pose_landmarker_lite.task"   # lite is plenty: only elbow+wrist are used
 
 CAM_INDEX = 0
 CAM_W, CAM_H = 1280, 720
@@ -52,6 +62,13 @@ SEND_HZ = 40
 SEND_ON_START = False          # press 's' once tracking looks right
 
 RIGHT_HAND = True              # which arm is being tracked
+
+# --- Pose cost control ---
+# The forearm moves slowly compared to fingers, so Pose does not need every
+# frame and does not need full resolution. Landmarks are normalized 0-1, so
+# downscaling costs nothing in the coordinate math.
+POSE_EVERY = 8                 # run Pose every Nth frame
+POSE_SCALE = 0.4               # downscale factor for the Pose input
 
 # --- ROI crop ---
 ROI_SCALE = 0.42               # crop side as a fraction of frame height
@@ -350,8 +367,17 @@ def main():
             num_poses=1))
 
     cap = cv2.VideoCapture(CAM_INDEX)
+    # MJPG first, then size. USB webcams default to raw YUYV, which saturates USB
+    # bandwidth at 720p and throttles the capture before MediaPipe sees anything.
+    # This matters far more on a Pi than on a laptop.
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    print("capture: %dx%d @ %.0f fps requested" % (
+        cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+        cap.get(cv2.CAP_PROP_FPS)))
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sending = SEND_ON_START
@@ -367,22 +393,30 @@ def main():
     t0 = time.time()
     fps_t, fps_n, fps = time.time(), 0, 0.0
 
+    frame_n = 0
+    last_pose_res = None
+
     while True:
         ok, frame = cap.read()
         if not ok:
             continue
-        frame = cv2.flip(frame, 1)
+        # NOTE: deliberately NOT mirrored. See module docstring.
         h, w = frame.shape[:2]
         ts = int((time.time() - t0) * 1000)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # ---- Pose on the full frame ----
-        pose_res = pose.detect_for_video(
-            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ts)
+        # ---- Pose, decimated and downscaled ----
+        frame_n += 1
+        if frame_n % POSE_EVERY == 0:
+            small = cv2.resize(rgb, None, fx=POSE_SCALE, fy=POSE_SCALE)
+            last_pose_res = pose.detect_for_video(
+                mp.Image(image_format=mp.ImageFormat.SRGB,
+                         data=np.ascontiguousarray(small)), ts)
+        pose_res = last_pose_res
 
         forearm = None
         pose_wrist_px = None
-        if pose_res.pose_landmarks:
+        if pose_res and pose_res.pose_landmarks:
             pl = pose_res.pose_landmarks[0]
             ei, wi = (POSE_R_ELBOW, POSE_R_WRIST) if RIGHT_HAND else \
                      (POSE_L_ELBOW, POSE_L_WRIST)
