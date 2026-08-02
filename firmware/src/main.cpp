@@ -28,6 +28,8 @@
   #define STA_SSID ""
   #define STA_PASS ""
 #endif
+
+#include "portal_html.h"
 #include <Adafruit_PWMServoDriver.h>
 #include <FastAccelStepper.h>
 
@@ -400,6 +402,16 @@ static String stateJson() {
     if (i) s += ",";
     s += String(target[i], 1);
   }
+  s += "],\"min\":[";
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    if (i) s += ",";
+    s += String(AXIS_MIN[i], 0);
+  }
+  s += "],\"max\":[";
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    if (i) s += ",";
+    s += String(AXIS_MAX[i], 0);
+  }
   s += "],\"names\":[";
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
@@ -415,6 +427,10 @@ static String stateJson() {
 }
 
 static void setupRoutes() {
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *r) {
+    r->send_P(200, "text/html", PORTAL_HTML);
+  });
+
   server.on("/state", HTTP_GET, [](AsyncWebServerRequest *r) {
     r->send(200, "application/json", stateJson());
   });
@@ -474,7 +490,7 @@ static void setupRoutes() {
   });
 
   server.onNotFound([](AsyncWebServerRequest *r) {
-    r->send(200, "text/plain", "ARA. See /state");
+    r->redirect("/");
   });
 }
 
