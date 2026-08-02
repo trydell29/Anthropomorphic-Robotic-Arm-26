@@ -1,5 +1,39 @@
-.pio
-.vscode/.browse.c_cpp.db*
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch
+# --- PlatformIO / firmware ---
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# --- Secrets ---------------------------------------------------------------
+# Real WiFi credentials. The .example.h template IS committed; this is not.
+# This repo is public and git history is permanent -- keep it that way.
+firmware/include/wifi_secrets.h
+wifi_secrets.h
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+
+# --- Python / vision host ---
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+*.egg-info/
+
+# --- MediaPipe models -----------------------------------------------------
+# These are multi-megabyte binaries. Do NOT commit them. The README carries
+# the curl commands to fetch them.
+*.task
+*.tflite
+
+# --- Calibration / runtime artifacts --------------------------------------
+# Calibration is per-operator and per-camera. Committing it means someone
+# else's neutral pose silently becomes yours.
+calibration.json
+*.local.json
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db

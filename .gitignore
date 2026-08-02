@@ -3,6 +3,12 @@
 .pioenvs/
 .piolibdeps/
 
+# --- Secrets ---------------------------------------------------------------
+# Real WiFi credentials. The .example.h template IS committed; this is not.
+# This repo is public and git history is permanent -- keep it that way.
+firmware/include/wifi_secrets.h
+wifi_secrets.h
+
 # --- Editors ---
 .vscode/
 .idea/

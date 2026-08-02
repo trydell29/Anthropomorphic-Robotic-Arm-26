@@ -15,7 +15,19 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <AsyncUDP.h>
+#include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
+
+// Optional station credentials for development, so you can reach the board
+// without leaving your normal network. Create firmware/include/wifi_secrets.h
+// from wifi_secrets.example.h -- it is gitignored and never committed.
+#if __has_include("wifi_secrets.h")
+  #include "wifi_secrets.h"
+#endif
+#ifndef STA_SSID
+  #define STA_SSID ""
+  #define STA_PASS ""
+#endif
 #include <Adafruit_PWMServoDriver.h>
 #include <FastAccelStepper.h>
 
@@ -27,6 +39,17 @@
 static const char *AP_SSID = "ARA-HAND";
 static const char *AP_PASS = "";          // open network; see README before changing
 static const uint16_t UDP_PORT = 4210;
+
+// Dual mode. The softAP is always up -- that is what the arm ships with and what
+// the Pi joins in the field. If STA credentials exist, the board ALSO joins that
+// network, so during development your laptop keeps its internet and you can
+// reach the board at http://ara.local without switching WiFi.
+//
+// Caveat worth knowing: an ESP32 cannot run AP and STA on different channels.
+// Joining your router moves the softAP to the router's channel. Harmless, but it
+// means the AP briefly drops when STA connects.
+static const char *MDNS_HOST = "ara";
+static const uint32_t STA_TIMEOUT_MS = 8000;
 
 // --- I2C / PCA9685 ---
 static const uint8_t PIN_SDA = 21;        // TBD confirm
@@ -363,6 +386,9 @@ static String stateJson() {
   s += "\",\"stale\":";       s += stale ? "true" : "false";
   s += ",\"switching\":";     s += switching ? "true" : "false";
   s += ",\"pca\":";           s += pcaPresent ? "true" : "false";
+  s += ",\"sta_ip\":\"";
+  s += (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
+  s += "\"";
   s += ",\"ramping\":";       s += rampActive ? "true" : "false";
   s += ",\"rx\":";            s += rxCount;
   s += ",\"malformed\":";     s += malformedCount;
@@ -498,10 +524,34 @@ void setup() {
     stepExt->setCurrentPosition(0);
   } else Serial.println("WARN: ext stepper failed to attach");
 
-  WiFi.mode(WIFI_AP);
+  const bool wantSta = (strlen(STA_SSID) > 0);
+  WiFi.mode(wantSta ? WIFI_AP_STA : WIFI_AP);
+
   if (strlen(AP_PASS) == 0) WiFi.softAP(AP_SSID);
   else                      WiFi.softAP(AP_SSID, AP_PASS);
   Serial.print("AP up at "); Serial.println(WiFi.softAPIP());
+
+  if (wantSta) {
+    Serial.printf("joining %s ", STA_SSID);
+    WiFi.begin(STA_SSID, STA_PASS);
+    uint32_t t = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t < STA_TIMEOUT_MS) {
+      delay(250);
+      Serial.print(".");
+    }
+    Serial.println();
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.print("STA up at "); Serial.println(WiFi.localIP());
+    } else {
+      // Not fatal. The arm runs on its own AP; STA is a convenience.
+      Serial.println("STA failed -- continuing on softAP only");
+    }
+  }
+
+  if (MDNS.begin(MDNS_HOST)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS: http://%s.local\n", MDNS_HOST);
+  }
 
   if (udp.listen(UDP_PORT)) {
     udp.onPacket(handlePacket);
