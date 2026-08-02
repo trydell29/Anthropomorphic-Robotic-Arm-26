@@ -174,6 +174,7 @@ static volatile bool  cvHasNew = false;
 static bool switching = false;   // manual->CV, waiting on elbow return
 
 Adafruit_PWMServoDriver pca(PCA_ADDR);
+static bool pcaPresent = false;   // probed at boot; see setup()
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *stepRoll = nullptr;
 FastAccelStepper *stepExt  = nullptr;
@@ -335,7 +336,9 @@ static void controlTick() {
   }
 
   // Servos 0..10
-  for (uint8_t i = 0; i < SERVO_COUNT; i++) writeServo(i, out[i]);
+  if (pcaPresent) {
+    for (uint8_t i = 0; i < SERVO_COUNT; i++) writeServo(i, out[i]);
+  }
 
   // Steppers.  moveTo is idempotent, so calling every tick is fine.
   if (stepRoll) stepRoll->moveTo(degToSteps(out[AX_ELBOW_ROLL], GEAR_ROLL));
@@ -359,6 +362,7 @@ static String stateJson() {
   s += (mode == MODE_CV ? "CV" : "MANUAL");
   s += "\",\"stale\":";       s += stale ? "true" : "false";
   s += ",\"switching\":";     s += switching ? "true" : "false";
+  s += ",\"pca\":";           s += pcaPresent ? "true" : "false";
   s += ",\"ramping\":";       s += rampActive ? "true" : "false";
   s += ",\"rx\":";            s += rxCount;
   s += ",\"malformed\":";     s += malformedCount;
@@ -463,9 +467,19 @@ void setup() {
   }
 
   Wire.begin(PIN_SDA, PIN_SCL);
-  pca.begin();
-  pca.setOscillatorFrequency(27000000);
-  pca.setPWMFreq(PCA_FREQ_HZ);
+  // Probe before trusting the board is there. Without this, writeServo() fails
+  // silently 550 times a second while the firmware reports itself healthy --
+  // and the I2C error spam buries every other line on the console.
+  Wire.beginTransmission(PCA_ADDR);
+  pcaPresent = (Wire.endTransmission() == 0);
+  if (pcaPresent) {
+    pca.begin();
+    pca.setOscillatorFrequency(27000000);
+    pca.setPWMFreq(PCA_FREQ_HZ);
+    Serial.println("PCA9685 found at 0x40");
+  } else {
+    Serial.println("WARN: no PCA9685 at 0x40 -- servo output disabled");
+  }
 
   engine.init();
   stepRoll = engine.stepperConnectToPin(PIN_ROLL_STEP);
