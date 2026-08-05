@@ -101,6 +101,23 @@ section{margin-top:1.6rem}
 .axis.dis{opacity:.42}
 .axis.dis input{cursor:not-allowed}
 
+/* ---- bench jog ---- */
+.jogrow{
+  display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;padding:.5rem 0;
+  border-bottom:1px solid rgba(201,198,191,.5);
+}
+.jogrow .idx{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim)}
+.jogrow .nm{font-size:12.5px;min-width:8ch}
+.jogrow input[type=number]{
+  width:5.5rem;font:12px ui-monospace,Menlo,monospace;padding:.35rem .4rem;
+  border:1px solid var(--rule);border-radius:2px;background:var(--field);color:var(--ink);
+}
+.jogrow .st{margin-left:auto;font:600 11px/1 ui-monospace,Menlo,monospace;
+            letter-spacing:.06em;color:var(--dim)}
+.jogrow .st.on{color:var(--live)}
+.jogrow.dis{opacity:.42}
+.jogrow.dis button,.jogrow.dis input{pointer-events:none}
+
 .mark{
   font:600 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.08em;
   border:1px solid var(--rule);background:var(--field);color:var(--dim);
@@ -186,6 +203,15 @@ button.b:focus-visible{outline:2px solid var(--live);outline-offset:1px}
 </section>
 
 <section>
+  <div class="shead"><h2>Bench jog</h2>
+    <span class="note">continuous spin for wiring/direction checks &mdash; MANUAL mode only</span></div>
+  <div id="jogAxes"></div>
+  <p class="hint">There is <b>no position limit</b> while jogging &mdash; the joint
+     keeps turning until you press <b>stop</b>. Start at low Hz. Switching to
+     Vision force-stops any active jog.</p>
+</section>
+
+<section>
   <div class="shead"><h2>Limit capture</h2><span class="note">for the TBD table in main.cpp</span></div>
   <p class="hint">Drive a joint to the edge of its safe travel, then press
      <b>lo</b> or <b>hi</b> on that row to record where you stopped. When every
@@ -232,11 +258,14 @@ function render(){
   el('dUdp').className='dot '+(!cv?'':(st.stale?'off':'on'));
   el('sRx').innerHTML='rx <b>'+st.rx+'</b>';
   el('sBad').innerHTML='malformed <b>'+st.malformed+'</b>';
-  el('sMot').textContent = (st.roll_running||st.ext_running) ? 'moving' : '';
+  const jogging = st.roll_jogging || st.ext_jogging;
+  el('sMot').textContent = jogging ? 'jogging' : (st.roll_running||st.ext_running) ? 'moving' : '';
 
   if(el('presets').firstElementChild.tagName!=='BUTTON') drawPresets();
   if(!el('handAxes').querySelector('.axis')) drawAxes();
   syncAxes();
+  if(!el('jogAxes').querySelector('.jogrow')) drawJog();
+  syncJog();
 }
 
 function drawPresets(){
@@ -317,6 +346,45 @@ function zeroAxis(i){
   const n=st?st.names[i].replace(/_/g,' '):'axis '+i;
   if(confirm('Declare the current physical position of '+n+' to be zero?\n\nEvery preset is measured from here.')) post('/zero','axis='+i);
 }
+
+const JOG_MIN=100, JOG_MAX=8000;
+
+function jogRow(i){
+  return `<div class="jogrow" id="jax${i}">
+    <span class="idx mono">${String(i).padStart(2,'0')}</span>
+    <span class="nm">${st.names[i].replace(/_/g,' ')}</span>
+    <input type="number" id="jspd${i}" value="500" min="${JOG_MIN}" max="${JOG_MAX}"
+           step="50" aria-label="jog speed, Hz">
+    <span class="mono" style="font-size:11px;color:var(--dim)">Hz</span>
+    <button class="b" onclick="jog(${i},-1)">run &#9664;</button>
+    <button class="b" onclick="jog(${i},1)">run &#9654;</button>
+    <button class="b danger" onclick="jogStop(${i})">stop</button>
+    <span class="st mono" id="jst${i}"></span>
+  </div>`;
+}
+
+function drawJog(){
+  el('jogAxes').innerHTML = jogRow(11) + jogRow(12);
+}
+
+function syncJog(){
+  const dis = st.mode==='CV';
+  [11,12].forEach(i=>{
+    const jogging = i===11 ? st.roll_jogging : st.ext_jogging;
+    el('jax'+i).className = 'jogrow'+(dis?' dis':'');
+    el('jax'+i).querySelectorAll('button,input').forEach(x=>x.disabled=dis);
+    const s=el('jst'+i);
+    s.textContent = jogging ? 'JOGGING' : '';
+    s.className = 'st mono'+(jogging?' on':'');
+  });
+}
+
+function jogSpeed(i){
+  const v = +el('jspd'+i).value;
+  return Math.max(JOG_MIN, Math.min(JOG_MAX, v||JOG_MIN));
+}
+function jog(i,dir){ post('/jog','axis='+i+'&dir='+dir+'&speed='+jogSpeed(i)); }
+function jogStop(i){ post('/jog','axis='+i+'&stop=1'); }
 
 function mark(i,which){
   const v=Math.round(st.axes[i]);

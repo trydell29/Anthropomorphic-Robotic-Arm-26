@@ -20,12 +20,13 @@ Why the ROI crop:
   splay channels need -- they have the least angular travel and the least
   tolerance for landmark noise.
 
-Why the preview is NOT mirrored:
+Why detection runs on the un-mirrored frame:
   MediaPipe labels pose landmarks anatomically, from what it sees. Mirroring the
   frame makes a right arm look like a left one, so landmarks 14/16 stop being
-  your right elbow/wrist and hand chirality inverts along with it. Keeping the
-  frame un-mirrored costs about thirty seconds of feeling weird and removes an
-  entire class of silent sign errors.
+  your right elbow/wrist and hand chirality inverts along with it. All pose/hand
+  detection above happens on the raw frame; only the displayed preview is
+  flipped afterward, purely for a natural mirror-like view. This removes an
+  entire class of silent sign errors while still looking normal on screen.
 
 Keys:  c = calibrate    s = toggle sending    ESC = quit
 
@@ -522,7 +523,10 @@ def main():
         cv2.putText(frame, f"{fps:.1f} fps", (w - 110, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
-        cv2.imshow("ARA teleop  [c] calibrate  [s] send  [ESC] quit", frame)
+        # Mirror for display only -- detection above runs on the unflipped
+        # frame so MediaPipe's anatomical left/right labeling stays correct.
+        cv2.imshow("ARA teleop  [c] calibrate  [s] send  [ESC] quit",
+                   cv2.flip(frame, 1))
 
         k = cv2.waitKey(1) & 0xFF
         if k == 27:

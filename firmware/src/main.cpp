@@ -59,25 +59,87 @@ static const uint8_t PIN_SCL = 22;        // TBD confirm
 static const uint8_t PCA_ADDR = 0x40;
 static const float   PCA_FREQ_HZ = 50.0f;
 
-// --- Stepper pins ---  TBD confirm all four
+// --- Stepper pins -- SUPERSEDED 2026-08-04 ---
+// Repo originally assumed two identical TMC2209s sharing one pin/geometry
+// config and EN tied to GND. As-built, the two axes use different driver
+// ICs on different pins, each with its own active-low EN line. Kept for
+// history; not read by any code below. See StepperAxisConfig / EXT_CFG /
+// ROLL_CFG for the values actually in effect.
 static const uint8_t PIN_ROLL_STEP = 26;
 static const uint8_t PIN_ROLL_DIR  = 25;
 static const uint8_t PIN_EXT_STEP  = 33;
 static const uint8_t PIN_EXT_DIR   = 32;
 // EN is tied to GND on both drivers -- no enable pin in software.
 
-// --- Stepper geometry ---
+// --- Stepper geometry -- SUPERSEDED 2026-08-04 ---
+// MICROSTEPS was a shared TBD guess (8) applied to both axes via one
+// gear-ratio parameter. As-built, both drivers turned out to be strapped
+// for 1/16 (a coincidence, not a shared config), but they're on different
+// pins with different EN lines, so each axis now carries its own full
+// config rather than sharing these globals. Kept for history; not read by
+// any code below.
 static const float STEPS_PER_REV = 200.0f;   // 1.8 deg NEMA 17
 static const float MICROSTEPS    = 8.0f;     // TBD confirm MS1/MS2 straps
 static const float GEAR_ROLL     = 4.0f;     // pron/sup planetary
 static const float GEAR_EXT      = 64.0f;    // elbow planetary
 
-// Motion limits.  The 64:1 axis is slow by construction -- do not chase it
-// with more acceleration, a printed planetary will skip and lose the zero.
+// --- Motion limits -- SUPERSEDED 2026-08-04 ---
+// Folded into speedHz/accel in EXT_CFG/ROLL_CFG below (same values carried
+// over). Kept for history; not read by any code below.
+// The 64:1 axis is slow by construction -- do not chase it with more
+// acceleration, a printed planetary will skip and lose the zero.
 static const uint32_t ROLL_SPEED_HZ = 4000;
 static const uint32_t ROLL_ACCEL    = 8000;
 static const uint32_t EXT_SPEED_HZ  = 6000;
 static const uint32_t EXT_ACCEL     = 6000;
+
+// --- Stepper driver config (as-built 2026-08-04) ---
+// Two DIFFERENT driver ICs -- not two of the same board:
+//   ext  (elbow extension/retraction, 64:1 planetary) -- Adafruit TMC2209
+//        breakout (PID 6121), standalone/no UART, MS1+MS2 tied to VDD =>
+//        1/16 microstepping. PDN/UART left floating. VM = 12 V (board max
+//        29 V).
+//   roll (elbow pronation/supination, 4:1 planetary) -- Adafruit A4988
+//        breakout (PID 6109), MS1/MS2/MS3 left open => 1/16 microstepping
+//        (this board's default). RESET jumpered to SLEEP. VMOT = 12 V
+//        (board max 35 V).
+// Both motors: StepperOnline 17HS19-2004S1 NEMA 17, 1.8 deg/step (200 full
+// steps/rev), 2.0 A/phase rated -- but both drivers' onboard trimpots are
+// set to ~1.2 A, the driver IC's thermal limit, not the motor's. Both EN
+// lines are active-low. 3200 microsteps/rev on both axes.
+struct StepperAxisConfig {
+  uint8_t  stepPin;
+  uint8_t  dirPin;
+  uint8_t  enPin;             // active low on both drivers
+  bool     invertDir;         // flip if the motor spins the wrong way
+  float    fullStepsPerRev;   // motor full steps/rev (1.8 deg -> 200)
+  float    microsteps;        // driver's microstep divisor
+  float    gearRatio;         // planetary reduction
+  uint32_t speedHz;
+  uint32_t accel;
+};
+
+static constexpr StepperAxisConfig EXT_CFG = {
+  26, 25, 27,                 // step, dir, en -- unchanged from original pinout
+  false,                      // invertDir
+  200.0f, 16.0f, 64.0f,       // fullStepsPerRev, microsteps, gearRatio
+  6000, 6000,                 // speedHz, accel
+};
+
+static constexpr StepperAxisConfig ROLL_CFG = {
+  32, 33, 14,                 // step, dir, en
+  false,                      // invertDir
+  200.0f, 16.0f, 4.0f,        // fullStepsPerRev, microsteps, gearRatio
+  4000, 8000,                 // speedHz, accel
+};
+
+static constexpr float axisStepsPerDeg(const StepperAxisConfig &c) {
+  return (c.fullStepsPerRev * c.microsteps * c.gearRatio) / 360.0f;
+}
+// ext:  (200 * 16 * 64) / 360 = 568.888... steps/deg
+// roll: (200 * 16 *  4) / 360 =  35.555... steps/deg
+static constexpr float EXT_STEPS_PER_DEG  = axisStepsPerDeg(EXT_CFG);
+static constexpr float ROLL_STEPS_PER_DEG = axisStepsPerDeg(ROLL_CFG);
 
 // --- Timing ---
 static const uint32_t CONTROL_PERIOD_MS = 20;    // 50 Hz output tick
@@ -105,10 +167,19 @@ enum AxisIdx : uint8_t {
 };
 
 static const uint8_t CV_AXIS_COUNT  = 12;  // UDP carries 0..11
-static const uint8_t SERVO_COUNT    = 11;  // PCA channels 0..10
+static const uint8_t SERVO_COUNT    = 11;  // 11 servos, spread over PCA ch 0..15
 
-// Axis index == PCA channel for 0..10.  Deliberate.  If a servo moves to a
-// different channel, move it in the axis table too -- do not add a lookup.
+// Axis index -> PCA9685 channel. Not 1:1: the finger+wrist bank sits on the
+// LAST 6 channels (10-15) and the splay+opposition bank on the FIRST 5
+// (0-4), leaving ch 5-9 as a spare gap in the middle. If a servo moves to a
+// different channel, update this table -- it is the only place that knows
+// the mapping.
+static const uint8_t AXIS_TO_PCA[SERVO_COUNT] = {
+  10, 11, 12, 13, 14, // thumb/index/middle/ring/pinky flex
+  15,                 // wrist
+  0, 1, 2, 3,         // index/middle/ring/pinky splay
+  4                   // thumb opposition
+};
 
 static const char *AXIS_NAME[AXIS_COUNT] = {
   "thumb_flex", "index_flex", "middle_flex", "ring_flex", "pinky_flex",
@@ -198,6 +269,16 @@ static volatile bool  cvHasNew = false;
 
 static bool switching = false;   // manual->CV, waiting on elbow return
 
+// Bench jog: continuous run at an operator-chosen speed/direction, for
+// verifying wiring/microstepping/gear direction before trusting normal
+// position control. While active for an axis, controlTick() skips that
+// axis's moveTo() entirely -- see JOG_SPEED_MIN_HZ/MAX_HZ below. There is
+// NO position limit while jogging, only the operator's stop button.
+static bool jogRollActive = false;
+static bool jogExtActive  = false;
+static const uint32_t JOG_SPEED_MIN_HZ = 100;
+static const uint32_t JOG_SPEED_MAX_HZ = 8000;
+
 Adafruit_PWMServoDriver pca(PCA_ADDR);
 static bool pcaPresent = false;   // probed at boot; see setup()
 FastAccelStepperEngine engine = FastAccelStepperEngine();
@@ -222,12 +303,45 @@ static inline float smoothstep(float t) {
   return t * t * (3.0f - 2.0f * t);
 }
 
+// SUPERSEDED 2026-08-04: took a shared gear ratio and read the shared
+// STEPS_PER_REV/MICROSTEPS globals above, which assumed both axes ran the
+// same microstepping. Kept for history; not called below. See
+// degToStepsAxis(), which takes a precomputed per-axis steps-per-degree
+// instead (EXT_STEPS_PER_DEG / ROLL_STEPS_PER_DEG).
 static inline int32_t degToSteps(float deg, float gear) {
   return (int32_t)lroundf(deg * (STEPS_PER_REV * MICROSTEPS * gear) / 360.0f);
 }
 
 static inline float stepsToDeg(int32_t steps, float gear) {
   return (float)steps * 360.0f / (STEPS_PER_REV * MICROSTEPS * gear);
+}
+
+static inline int32_t degToStepsAxis(float deg, float stepsPerDeg) {
+  return (int32_t)lroundf(deg * stepsPerDeg);
+}
+
+static inline float stepsToDegAxis(int32_t steps, float stepsPerDeg) {
+  return (float)steps / stepsPerDeg;
+}
+
+// Attaches one stepper axis from its StepperAxisConfig. Both drivers are
+// wired EN-active-low; enableOutputs() is called once here and left on,
+// matching the old EN-tied-to-GND behavior rather than switching to
+// FastAccelStepper's auto-enable/disable.
+static FastAccelStepper *attachAxis(const StepperAxisConfig &cfg, const char *label) {
+  FastAccelStepper *s = engine.stepperConnectToPin(cfg.stepPin);
+  if (!s) {
+    Serial.printf("WARN: %s stepper failed to attach\n", label);
+    return nullptr;
+  }
+  s->setDirectionPin(cfg.dirPin, !cfg.invertDir);
+  s->setEnablePin(cfg.enPin, true);   // true = low_active_enables_stepper
+  s->setAutoEnable(false);
+  s->enableOutputs();
+  s->setSpeedInHz(cfg.speedHz);
+  s->setAcceleration(cfg.accel);
+  s->setCurrentPosition(0);           // boot assumption: mechanical neutral
+  return s;
 }
 
 // Wrap-safe sequence comparison.  PROTOCOL.md section 3.1.
@@ -240,7 +354,7 @@ static void writeServo(uint8_t axis, float deg) {
   if (t < 0.0f) t = 0.0f;
   if (t > 1.0f) t = 1.0f;
   uint16_t us = (uint16_t)(SERVO_MIN_US + t * (SERVO_MAX_US - SERVO_MIN_US));
-  pca.writeMicroseconds(axis, us);   // axis index == PCA channel
+  pca.writeMicroseconds(AXIS_TO_PCA[axis], us);
 }
 
 // ============================================================================
@@ -292,6 +406,11 @@ static void handlePacket(AsyncUDPPacket &pkt) {
 
 static void enterCV() {
   if (mode == MODE_CV) return;
+  // A bench jog fighting the CV stream's control of roll (or the
+  // boot-neutral return on ext, below) is not a state worth supporting --
+  // abort outright.
+  if (jogRollActive && stepRoll) { stepRoll->forceStop(); jogRollActive = false; }
+  if (jogExtActive  && stepExt)  { stepExt->forceStop();  jogExtActive  = false; }
   // Axis 12 is not carried by the stream -- return it to boot zero and park.
   target[AX_ELBOW_EXT] = 0.0f;
   if (stepExt) stepExt->moveTo(0);
@@ -366,8 +485,35 @@ static void controlTick() {
   }
 
   // Steppers.  moveTo is idempotent, so calling every tick is fine.
-  if (stepRoll) stepRoll->moveTo(degToSteps(out[AX_ELBOW_ROLL], GEAR_ROLL));
-  if (stepExt)  stepExt->moveTo(degToSteps(out[AX_ELBOW_EXT],  GEAR_EXT));
+  // While a bench jog is active for an axis, skip its moveTo() entirely --
+  // otherwise this would fight runForward()/runBackward() every 20ms. Once
+  // a stopped jog actually settles (isRunning() goes false), resync
+  // target[] to wherever it landed (clamped, same invariant as every other
+  // write to target[]) so normal control resumes from there -- if the jog
+  // went past the normal range, this schedules an ordinary accelerated
+  // moveTo() back inside it on the next tick, not a snap. See /jog.
+  if (stepRoll) {
+    if (jogRollActive) {
+      if (!stepRoll->isRunning()) {
+        target[AX_ELBOW_ROLL] = clampAxis(AX_ELBOW_ROLL,
+            stepsToDegAxis(stepRoll->getCurrentPosition(), ROLL_STEPS_PER_DEG));
+        jogRollActive = false;
+      }
+    } else {
+      stepRoll->moveTo(degToStepsAxis(out[AX_ELBOW_ROLL], ROLL_STEPS_PER_DEG));
+    }
+  }
+  if (stepExt) {
+    if (jogExtActive) {
+      if (!stepExt->isRunning()) {
+        target[AX_ELBOW_EXT] = clampAxis(AX_ELBOW_EXT,
+            stepsToDegAxis(stepExt->getCurrentPosition(), EXT_STEPS_PER_DEG));
+        jogExtActive = false;
+      }
+    } else {
+      stepExt->moveTo(degToStepsAxis(out[AX_ELBOW_EXT], EXT_STEPS_PER_DEG));
+    }
+  }
 
   if (switching && stepExt && !stepExt->isRunning()) switching = false;
 }
@@ -397,6 +543,8 @@ static String stateJson() {
   s += ",\"stale_drops\":";   s += staleDropCount;
   s += ",\"roll_running\":";  s += (stepRoll && stepRoll->isRunning()) ? "true" : "false";
   s += ",\"ext_running\":";   s += (stepExt  && stepExt->isRunning())  ? "true" : "false";
+  s += ",\"roll_jogging\":";  s += jogRollActive ? "true" : "false";
+  s += ",\"ext_jogging\":";   s += jogExtActive  ? "true" : "false";
   s += ",\"axes\":[";
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
@@ -489,6 +637,44 @@ static void setupRoutes() {
     r->send(200, "application/json", stateJson());
   });
 
+  // POST /jog?axis=11&dir=1&speed=2000  -- bench-only: spin continuously.
+  // POST /jog?axis=11&stop=1            -- decelerate; controlTick() hands
+  //                                         the axis back to normal control
+  //                                         once it actually stops.
+  // MANUAL mode only, stepper axes only. Bypasses AXIS_MIN/AXIS_MAX -- this
+  // is deliberately a raw hardware test, not a position command. Speed is
+  // clamped to JOG_SPEED_MIN_HZ..JOG_SPEED_MAX_HZ regardless of what's sent.
+  server.on("/jog", HTTP_POST, [](AsyncWebServerRequest *r) {
+    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
+    if (!r->hasParam("axis", true)) { r->send(400, "text/plain", "need axis"); return; }
+    int a = r->getParam("axis", true)->value().toInt();
+
+    FastAccelStepper *s = nullptr;
+    bool *active = nullptr;
+    if (a == AX_ELBOW_ROLL)      { s = stepRoll; active = &jogRollActive; }
+    else if (a == AX_ELBOW_EXT)  { s = stepExt;  active = &jogExtActive;  }
+    if (!s || !active) { r->send(400, "text/plain", "axis is not a stepper"); return; }
+
+    if (r->hasParam("stop", true)) {
+      s->stopMove();   // normal deceleration -- see controlTick() for resync
+      r->send(200, "application/json", stateJson());
+      return;
+    }
+
+    if (!r->hasParam("dir", true) || !r->hasParam("speed", true)) {
+      r->send(400, "text/plain", "need dir and speed"); return;
+    }
+    int dir = r->getParam("dir", true)->value().toInt();
+    uint32_t speed = (uint32_t)r->getParam("speed", true)->value().toInt();
+    if (speed < JOG_SPEED_MIN_HZ) speed = JOG_SPEED_MIN_HZ;
+    if (speed > JOG_SPEED_MAX_HZ) speed = JOG_SPEED_MAX_HZ;
+
+    s->setSpeedInHz(speed);
+    *active = true;
+    if (dir >= 0) s->runForward(); else s->runBackward();
+    r->send(200, "application/json", stateJson());
+  });
+
   server.onNotFound([](AsyncWebServerRequest *r) {
     r->redirect("/");
   });
@@ -524,21 +710,8 @@ void setup() {
   }
 
   engine.init();
-  stepRoll = engine.stepperConnectToPin(PIN_ROLL_STEP);
-  if (stepRoll) {
-    stepRoll->setDirectionPin(PIN_ROLL_DIR);
-    stepRoll->setSpeedInHz(ROLL_SPEED_HZ);
-    stepRoll->setAcceleration(ROLL_ACCEL);
-    stepRoll->setCurrentPosition(0);      // boot assumption: mechanical neutral
-  } else Serial.println("WARN: roll stepper failed to attach");
-
-  stepExt = engine.stepperConnectToPin(PIN_EXT_STEP);
-  if (stepExt) {
-    stepExt->setDirectionPin(PIN_EXT_DIR);
-    stepExt->setSpeedInHz(EXT_SPEED_HZ);
-    stepExt->setAcceleration(EXT_ACCEL);
-    stepExt->setCurrentPosition(0);
-  } else Serial.println("WARN: ext stepper failed to attach");
+  stepRoll = attachAxis(ROLL_CFG, "roll");
+  stepExt  = attachAxis(EXT_CFG,  "ext");
 
   const bool wantSta = (strlen(STA_SSID) > 0);
   WiFi.mode(wantSta ? WIFI_AP_STA : WIFI_AP);

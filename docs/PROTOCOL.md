@@ -16,8 +16,8 @@ written against them.
 ```
   camera ──► Raspberry Pi 5 ──── UDP ────► ESP32 ──► PCA9685 ──► 11 servos
              MediaPipe Pose        (WiFi)    │
-             MediaPipe Hand                  ├──► TMC driver ──► elbow roll stepper
-             12 axis values                  ├──► TMC driver ──► elbow extension stepper
+             MediaPipe Hand                  ├──► A4988   ──► elbow roll stepper (4:1)
+             12 axis values                  ├──► TMC2209 ──► elbow extension stepper (64:1)
                                              │
              browser ──── HTTP ──────────────┘  captive portal (softAP "ARA-HAND")
 ```
@@ -37,23 +37,48 @@ in the portal, and in firmware. Never reorder this table.
 
 | Idx | Axis | Actuator | Output | Unit | Neutral | Convention |
 |----|------|----------|--------|------|---------|------------|
-| 0 | thumb flexion | MG996R | PCA ch 0 | 0–180 | 180 | 180 = open, 0 = closed |
-| 1 | index flexion | MG996R | PCA ch 1 | 0–180 | 180 | 180 = open, 0 = closed |
-| 2 | middle flexion | MG996R | PCA ch 2 | 0–180 | 180 | 180 = open, 0 = closed |
-| 3 | ring flexion | MG996R | PCA ch 3 | 0–180 | 180 | 180 = open, 0 = closed |
-| 4 | pinky flexion | MG996R | PCA ch 4 | 0–180 | 180 | 180 = open, 0 = closed |
-| 5 | wrist flex/ext | AGFRC 15.5kg | PCA ch 5 | 0–180 | 90 | >90 = flexion (palm-ward), <90 = extension |
-| 6 | index splay | SG90 | PCA ch 6 | 0–180 | 90 | >90 = abduction (away from middle) |
-| 7 | middle splay | SG90 | PCA ch 7 | 0–180 | 90 | >90 = abduction |
-| 8 | ring splay | SG90 | PCA ch 8 | 0–180 | 90 | >90 = abduction |
-| 9 | pinky splay | SG90 | PCA ch 9 | 0–180 | 90 | >90 = abduction |
-| 10 | thumb opposition | SG90 | PCA ch 10 | 0–180 | 90 | >90 = toward pinky |
-| 11 | elbow roll (pron/sup) | NEMA 17, 4:1 | TMC | signed deg | 0 | + = pronation, − = supination |
-| 12 | elbow extension | NEMA 17, 64:1 | TMC | signed deg | 0 | + = extension, − = retraction |
+| 0 | thumb flexion | MG996R | PCA ch 10 | 0–180 | 180 | 180 = open, 0 = closed |
+| 1 | index flexion | MG996R | PCA ch 11 | 0–180 | 180 | 180 = open, 0 = closed |
+| 2 | middle flexion | MG996R | PCA ch 12 | 0–180 | 180 | 180 = open, 0 = closed |
+| 3 | ring flexion | MG996R | PCA ch 13 | 0–180 | 180 | 180 = open, 0 = closed |
+| 4 | pinky flexion | MG996R | PCA ch 14 | 0–180 | 180 | 180 = open, 0 = closed |
+| 5 | wrist flex/ext | AGFRC 15.5kg | PCA ch 15 | 0–180 | 90 | >90 = flexion (palm-ward), <90 = extension |
+| 6 | index splay | SG90 | PCA ch 0 | 0–180 | 90 | >90 = abduction (away from middle) |
+| 7 | middle splay | SG90 | PCA ch 1 | 0–180 | 90 | >90 = abduction |
+| 8 | ring splay | SG90 | PCA ch 2 | 0–180 | 90 | >90 = abduction |
+| 9 | pinky splay | SG90 | PCA ch 3 | 0–180 | 90 | >90 = abduction |
+| 10 | thumb opposition | SG90 | PCA ch 4 | 0–180 | 90 | >90 = toward pinky |
+| 11 | elbow roll (pron/sup) | NEMA 17, 4:1 | A4988 | signed deg | 0 | + = pronation, − = supination |
+| 12 | elbow extension | NEMA 17, 64:1 | TMC2209 | signed deg | 0 | + = extension, − = retraction |
 
-**Axis index equals PCA channel for 0–10.** This is deliberate. Keep it that way if
-the map is revised — if a servo moves to a different PCA channel, move it in this
-table too rather than introducing a lookup.
+**Axis index does not equal PCA channel.** The finger+wrist bank (indices 0–5)
+sits on the **last 6** PCA channels (10–15); the splay+opposition bank (indices
+6–10) sits on the **first 5** (0–4). PCA ch 5–9 are an unused spare gap in the
+middle. See `AXIS_TO_PCA` in `firmware/src/main.cpp`, the one place that knows
+the axis-index-to-channel mapping. If a servo moves to a different channel,
+update that table.
+
+### 2.2 Stepper hardware (as-built)
+
+The two stepper axes are driven by **different driver ICs**, not two of the
+same board. Both motors are StepperOnline 17HS19-2004S1 NEMA 17 (1.8°/step,
+200 full steps/rev, 2.0 A/phase rated, coils A+ black / A− green / B+ red /
+B− blue). Both drivers are current-limited to **~1.2 A** via their onboard
+trimpots — the driver IC's thermal limit, not the motor's — and both run at
+**1/16 microstepping** (3200 microsteps/rev), so it is a coincidence that the
+two numbers match, not a shared config. Both `VM`/`VMOT` rails are 12 V.
+
+| Axis | Driver | STEP | DIR | EN | Microstep config | Board max V |
+|------|--------|------|-----|----|--------------------|-------------|
+| elbow extension (idx 12) | Adafruit TMC2209 (PID 6121), standalone, PDN/UART floating | GPIO 26 | GPIO 25 | GPIO 27 | MS1+MS2 → VDD ⇒ 1/16 | 29 V |
+| elbow roll (idx 11) | Adafruit A4988 (PID 6109), RESET→SLEEP jumpered | GPIO 32 | GPIO 33 | GPIO 14 | MS1/MS2/MS3 open ⇒ 1/16 (default) | 35 V |
+
+Both EN lines are **active-low**; firmware drives them low at boot and leaves
+them enabled, matching the earlier EN-tied-to-GND assumption. See
+`StepperAxisConfig` / `EXT_CFG` / `ROLL_CFG` in `firmware/src/main.cpp` for
+the single source of truth — including a per-axis `invertDir` flag for the
+case where a motor spins the wrong way (the two breakouts number their coil
+outputs differently).
 
 PCA channel assignment is **provisional**. Confirm by manual bench testing before
 running CV.
@@ -246,9 +271,16 @@ Enforced on the Pi, documented here because the ESP32's behavior depends on it.
 | POST | `/preset` | Recall by name |
 | POST | `/mode` | `{"mode": "CV"}` or `{"mode": "MANUAL"}` |
 | POST | `/zero` | `{"axis": 11}` — declare current position as zero |
+| POST | `/jog` | Bench-only continuous spin. `{"axis": 11, "dir": 1, "speed": 2000}` to run; `{"axis": 11, "stop": 1}` to decelerate. MANUAL mode + stepper axes only. |
 
 `/state` is what the portal polls to repopulate sliders. It is the mechanism behind
 the inherit-on-switch rule in §5.2.
+
+`/jog` bypasses `AXIS_MIN`/`AXIS_MAX` entirely — it commands the driver directly via
+`runForward()`/`runBackward()`, not a position. `target[]` is resynced to the
+stepper's actual rest position (clamped) once it settles after `stop`, so normal
+control picks up from there rather than snapping back to the pre-jog target.
+Switching to CV mode force-stops any active jog.
 
 ---
 
@@ -269,3 +301,6 @@ the inherit-on-switch rule in §5.2.
 | Version | Date | Change |
 |---------|------|--------|
 | 0.1 | 2026-08-02 | Initial draft |
+| 0.1 | 2026-08-04 | Stepper hardware corrected: elbow roll is an A4988 (was assumed TMC2209), elbow extension is a TMC2209 on unchanged pins; both confirmed 1/16 microstepping. |
+| 0.1 | 2026-08-04 | PCA channel map reworked: finger+wrist bank moved to the last 6 channels (10–15), splay+opposition bank to the first 5 (0–4), leaving ch 5–9 as a spare gap. |
+| 0.1 | 2026-08-05 | Reverted the 2026-08-04 bench-wiring `AXIS_TO_PCA`/`AXIS_WIRED` override (back to the planned last-6/first-5 layout). Added `/jog` bench test mode: continuous stepper spin with operator-set direction/speed, independent of `AXIS_MIN`/`AXIS_MAX`. |
