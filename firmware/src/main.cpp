@@ -169,16 +169,27 @@ enum AxisIdx : uint8_t {
 static const uint8_t CV_AXIS_COUNT  = 12;  // UDP carries 0..11
 static const uint8_t SERVO_COUNT    = 11;  // 11 servos, spread over PCA ch 0..15
 
-// Axis index -> PCA9685 channel. Not 1:1: the finger+wrist bank sits on the
-// LAST 6 channels (10-15) and the splay+opposition bank on the FIRST 5
-// (0-4), leaving ch 5-9 as a spare gap in the middle. If a servo moves to a
-// different channel, update this table -- it is the only place that knows
-// the mapping.
+// Axis index -> PCA9685 channel. Wiring order on the board, ch 0-10:
+// thumb opp, index/middle/ring/pinky splay, wrist,
+// thumb/index/middle/ring/pinky flex. If a servo moves to a different
+// channel, update this table -- it is the only place that knows the mapping.
 static const uint8_t AXIS_TO_PCA[SERVO_COUNT] = {
-  10, 11, 12, 13, 14, // thumb/index/middle/ring/pinky flex
-  15,                 // wrist
-  0, 1, 2, 3,         // index/middle/ring/pinky splay
-  4                   // thumb opposition
+  6, 7, 8, 9, 10,     // thumb/index/middle/ring/pinky flex
+  5,                  // wrist
+  1, 2, 3, 4,         // index/middle/ring/pinky splay
+  0                   // thumb opposition
+};
+
+// Per-servo output slew rate, deg/s. writeServo() otherwise jumps straight
+// to target[] every tick -- fine for the fingers, but the wrist's mass/lever
+// arm turns an instant commanded step into a visible snap. 0 = unlimited
+// (servo's own speed is the only limit). Tune per-axis here if others need
+// it too.
+static const float SERVO_MAX_DEG_PER_S[SERVO_COUNT] = {
+  0, 0, 0, 0, 0,      // finger flex   -- unlimited
+  90,                 // wrist         -- capped, ~2s for a full 180 sweep
+  0, 0, 0, 0,         // splay         -- unlimited
+  0                   // thumb opp     -- unlimited
 };
 
 static const char *AXIS_NAME[AXIS_COUNT] = {
@@ -278,6 +289,23 @@ static bool jogRollActive = false;
 static bool jogExtActive  = false;
 static const uint32_t JOG_SPEED_MIN_HZ = 100;
 static const uint32_t JOG_SPEED_MAX_HZ = 8000;
+
+// Servos have no position feedback -- PCA9685 is pure output, MG996R/SG90/
+// AGFRC have no telemetry line. Firmware cannot know where a servo actually
+// is, so it doesn't guess: a channel is only driven once something
+// explicitly commands that specific axis (portal slider, preset, or CV).
+// Until then it gets no PWM at all, rather than snapping to AXIS_NEUTRAL at
+// boot. Set wherever target[] is explicitly written for a servo axis; see
+// /axis, applyPreset(), and the CV branch of controlTick().
+static bool axisTouched[SERVO_COUNT] = {false};
+
+// Slew-limited output state -- see SERVO_MAX_DEG_PER_S. servoPos[i] is the
+// last position actually written to the PCA; servoSlewInit[i] tracks whether
+// it's been seeded yet, so the very first write for an axis still jumps
+// straight to target (no prior physical position to slew from) and only
+// later moves get capped.
+static float servoPos[SERVO_COUNT];
+static bool  servoSlewInit[SERVO_COUNT] = {false};
 
 Adafruit_PWMServoDriver pca(PCA_ADDR);
 static bool pcaPresent = false;   // probed at boot; see setup()
@@ -433,7 +461,10 @@ static void enterManual() {
 }
 
 static void applyPreset(const Preset &p) {
-  for (uint8_t i = 0; i < AXIS_COUNT; i++) target[i] = clampAxis(i, p.v[i]);
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    target[i] = clampAxis(i, p.v[i]);
+    if (i < SERVO_COUNT) axisTouched[i] = true;
+  }
   rampActive = false;   // preset recall retargets, it does not queue
 }
 
@@ -455,6 +486,7 @@ static void controlTick() {
       }
       for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) {
         target[i] = clampAxis(i, cvPending[i]);
+        if (i < SERVO_COUNT) axisTouched[i] = true;
       }
     }
     // Watchdog: hold last values.  Never zero, never open.  A hand full of
@@ -479,9 +511,26 @@ static void controlTick() {
     out[i] = clampAxis(i, out[i]);
   }
 
-  // Servos 0..10
+  // Servos 0..10. Only channels that have been explicitly commanded at
+  // least once are driven -- see axisTouched above.
   if (pcaPresent) {
-    for (uint8_t i = 0; i < SERVO_COUNT; i++) writeServo(i, out[i]);
+    for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+      if (!axisTouched[i]) continue;
+      float cmd = out[i];
+      if (!servoSlewInit[i]) {
+        servoPos[i] = cmd;          // first write for this axis: jump, don't slew
+        servoSlewInit[i] = true;
+      } else if (SERVO_MAX_DEG_PER_S[i] > 0.0f) {
+        float maxStep = SERVO_MAX_DEG_PER_S[i] * (CONTROL_PERIOD_MS / 1000.0f);
+        float delta = cmd - servoPos[i];
+        if (delta > maxStep) cmd = servoPos[i] + maxStep;
+        else if (delta < -maxStep) cmd = servoPos[i] - maxStep;
+        servoPos[i] = cmd;
+      } else {
+        servoPos[i] = cmd;
+      }
+      writeServo(i, servoPos[i]);
+    }
   }
 
   // Steppers.  moveTo is idempotent, so calling every tick is fine.
@@ -565,6 +614,13 @@ static String stateJson() {
     if (i) s += ",";
     s += "\""; s += AXIS_NAME[i]; s += "\"";
   }
+  // Physical PCA9685 channel each servo axis is wired to -- see AXIS_TO_PCA.
+  // -1 for the two stepper axes (roll/ext), which aren't on the PCA at all.
+  s += "],\"pca_ch\":[";
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    if (i) s += ",";
+    s += (i < SERVO_COUNT) ? String(AXIS_TO_PCA[i]) : String(-1);
+  }
   s += "],\"presets\":[";
   for (uint8_t i = 0; i < PRESET_COUNT; i++) {
     if (i) s += ",";
@@ -592,7 +648,15 @@ static void setupRoutes() {
     int idx = r->getParam("idx", true)->value().toInt();
     float v = r->getParam("value", true)->value().toFloat();
     if (idx < 0 || idx >= AXIS_COUNT) { r->send(400, "text/plain", "bad idx"); return; }
-    target[idx] = clampAxis((uint8_t)idx, v);
+    // raw=1: bench-test escape hatch for servo axes only. Ignores this
+    // axis's assumed AXIS_MIN/AXIS_MAX (e.g. splay's narrower 60-120) and
+    // just constrains to the servo's physical 0-180 sweep -- for sorting
+    // out which physical servo landed on which logical axis without
+    // fighting per-axis limits that may not even apply to what's actually
+    // wired there right now.
+    bool raw = r->hasParam("raw", true) && idx < SERVO_COUNT;
+    target[idx] = raw ? constrain(v, 0.0f, 180.0f) : clampAxis((uint8_t)idx, v);
+    if (idx < SERVO_COUNT) axisTouched[idx] = true;
     r->send(200, "application/json", stateJson());
   });
 

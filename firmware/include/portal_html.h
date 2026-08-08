@@ -187,8 +187,16 @@ button.b:focus-visible{outline:2px solid var(--live);outline-offset:1px}
 </section>
 
 <section>
-  <div class="shead"><h2>Hand</h2><span class="note">servos on the PCA9685</span></div>
+  <div class="shead"><h2>Hand</h2><span class="note">servos on the PCA9685</span>
+    <label style="margin-left:auto;display:flex;align-items:center;gap:.4rem;
+                  font-size:11px;color:var(--dim);cursor:pointer">
+      <input type="checkbox" id="rawTest" onchange="rawTest=this.checked">
+      full 0&ndash;180 sweep (ignore this axis's assumed limits)
+    </label>
+  </div>
   <div id="handAxes"><div class="empty">loading</div></div>
+  <p class="hint">A slider only sends the first time you move it &mdash; untouched
+     servos get no signal at all and stay wherever they physically are.</p>
 </section>
 
 <section>
@@ -229,7 +237,7 @@ button.b:focus-visible{outline:2px solid var(--live);outline-offset:1px}
 </div>
 <script>
 const N=13, SERVO_N=11;
-let st=null, dragging=-1, sendT={}, lo={}, hi={}, lastSent={};
+let st=null, dragging=-1, sendT={}, lo={}, hi={}, lastSent={}, rawTest=false;
 
 const el=id=>document.getElementById(id);
 const usFor=d=>Math.round(500+Math.max(0,Math.min(180,d))/180*2000);
@@ -277,8 +285,9 @@ function row(i){
   const stepper=!isServo(i);
   const min = stepper ? (i===11?-90:-30) : 0;
   const max = stepper ? (i===11? 90:120) : 180;
+  const chLabel = isServo(i) ? String(st.pca_ch[i]).padStart(2,'0') : '--';
   return `<div class="axis" id="ax${i}">
-    <span class="idx mono">${String(i).padStart(2,'0')}</span>
+    <span class="idx mono" title="PCA9685 channel">${chLabel}</span>
     <span class="nm">${st.names[i].replace(/_/g,' ')}</span>
     <input type="range" min="${min}" max="${max}" step="1" value="0"
            id="sl${i}" aria-label="${st.names[i]}"
@@ -326,7 +335,8 @@ function drag(i,v){
   el('v'+i).textContent=v;
   if(isServo(i)) el('u'+i).textContent=usFor(+v)+'\u00B5s';
   clearTimeout(sendT[i]);
-  sendT[i]=setTimeout(()=>post('/axis','idx='+i+'&value='+v,()=>{lastSent[i]=+v;}),45);
+  const raw = rawTest && isServo(i) ? '&raw=1' : '';
+  sendT[i]=setTimeout(()=>post('/axis','idx='+i+'&value='+v+raw,()=>{lastSent[i]=+v;}),45);
 }
 
 function post(path,body,then){

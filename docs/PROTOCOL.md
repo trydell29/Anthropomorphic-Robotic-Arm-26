@@ -239,6 +239,23 @@ Required mitigations:
 - The 64:1 axis should get a hard-stop homing routine when time allows. At that
   reduction, output error is too large a step count to recover by eye.
 
+### 6.1 Servo position reference
+
+Servos (MG996R, SG90, AGFRC) have **no position feedback at all** — no encoder, no
+telemetry line — and the PCA9685 is pure PWM output. Firmware cannot know where a
+servo physically is, at boot or ever, so it does not guess.
+
+**A servo channel is only driven once its axis is explicitly commanded** — a portal
+slider move, a preset recall, or a CV packet. Until then, no PWM is sent to that
+channel at all; it holds no position because nothing is telling it to. This means,
+unlike the steppers, there is no boot-neutral assumption for servos: `AXIS_NEUTRAL`
+is what a slider *shows* on first load, not what gets sent.
+
+The bench-test escape hatch (`/axis` with `raw=1`) constrains to the servo's
+physical 0–180° sweep instead of that axis's assumed `AXIS_MIN`/`AXIS_MAX` — for
+sorting out which physical servo is wired to which logical axis without fighting
+limits that may not apply to whatever is actually connected right now.
+
 ---
 
 ## 7. Vision host requirements
@@ -267,7 +284,7 @@ Enforced on the Pi, documented here because the ESP32's behavior depends on it.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/state` | Current target array, mode, transit status, watchdog state |
-| POST | `/axis` | Set one axis. Body: `{"idx": 5, "value": 95}` |
+| POST | `/axis` | Set one axis. Body: `{"idx": 5, "value": 95}`. Add `"raw": 1` on a servo axis to bypass its `AXIS_MIN`/`AXIS_MAX` and constrain to 0–180 instead — see §6.1. |
 | POST | `/preset` | Recall by name |
 | POST | `/mode` | `{"mode": "CV"}` or `{"mode": "MANUAL"}` |
 | POST | `/zero` | `{"axis": 11}` — declare current position as zero |
@@ -304,3 +321,4 @@ Switching to CV mode force-stops any active jog.
 | 0.1 | 2026-08-04 | Stepper hardware corrected: elbow roll is an A4988 (was assumed TMC2209), elbow extension is a TMC2209 on unchanged pins; both confirmed 1/16 microstepping. |
 | 0.1 | 2026-08-04 | PCA channel map reworked: finger+wrist bank moved to the last 6 channels (10–15), splay+opposition bank to the first 5 (0–4), leaving ch 5–9 as a spare gap. |
 | 0.1 | 2026-08-05 | Reverted the 2026-08-04 bench-wiring `AXIS_TO_PCA`/`AXIS_WIRED` override (back to the planned last-6/first-5 layout). Added `/jog` bench test mode: continuous stepper spin with operator-set direction/speed, independent of `AXIS_MIN`/`AXIS_MAX`. |
+| 0.1 | 2026-08-05 | Servos are no longer driven to `AXIS_NEUTRAL` at boot (§6.1) — a channel gets no PWM until explicitly commanded. Added `/axis` `raw=1` to bypass a servo axis's assumed limits for full 0–180 bench sweeps. |
