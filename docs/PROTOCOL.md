@@ -37,26 +37,42 @@ in the portal, and in firmware. Never reorder this table.
 
 | Idx | Axis | Actuator | Output | Unit | Neutral | Convention |
 |----|------|----------|--------|------|---------|------------|
-| 0 | thumb flexion | MG996R | PCA ch 10 | 0–180 | 180 | 180 = open, 0 = closed |
-| 1 | index flexion | MG996R | PCA ch 11 | 0–180 | 180 | 180 = open, 0 = closed |
-| 2 | middle flexion | MG996R | PCA ch 12 | 0–180 | 180 | 180 = open, 0 = closed |
-| 3 | ring flexion | MG996R | PCA ch 13 | 0–180 | 180 | 180 = open, 0 = closed |
-| 4 | pinky flexion | MG996R | PCA ch 14 | 0–180 | 180 | 180 = open, 0 = closed |
-| 5 | wrist flex/ext | AGFRC 15.5kg | PCA ch 15 | 0–180 | 90 | >90 = flexion (palm-ward), <90 = extension |
-| 6 | index splay | SG90 | PCA ch 0 | 0–180 | 90 | >90 = abduction (away from middle) |
-| 7 | middle splay | SG90 | PCA ch 1 | 0–180 | 90 | >90 = abduction |
-| 8 | ring splay | SG90 | PCA ch 2 | 0–180 | 90 | >90 = abduction |
-| 9 | pinky splay | SG90 | PCA ch 3 | 0–180 | 90 | >90 = abduction |
-| 10 | thumb opposition | SG90 | PCA ch 4 | 0–180 | 90 | >90 = toward pinky |
+| 0 | thumb flexion | MG996R | PCA ch 6 | 0–180 | 180 | 180 = open, 0 = closed |
+| 1 | index flexion | MG996R | PCA ch 7 | 0–180 | 180 | 180 = open, 0 = closed |
+| 2 | middle flexion | MG996R | PCA ch 8 | 0–180 | 180 | 180 = open, 0 = closed |
+| 3 | ring flexion | MG996R | PCA ch 9 | 0–180 | 180 | 180 = open, 0 = closed |
+| 4 | pinky flexion | MG996R | PCA ch 10 | 0–180 | 180 | 180 = open, 0 = closed |
+| 5 | wrist flex/ext | AGFRC 15.5kg | PCA ch 5 | 0–180 | 90 | >90 = flexion (palm-ward), <90 = extension |
+| 6 | index splay | SG90 | PCA ch 1 | 70–110 | 90 | >90 = abduction (away from middle) |
+| 7 | middle splay | SG90 | PCA ch 2 | 70–110 | 90 | >90 = abduction |
+| 8 | ring splay | SG90 | PCA ch 3 | 70–110 | 90 | >90 = abduction |
+| 9 | pinky splay | SG90 | PCA ch 4 | 70–110 | 90 | >90 = abduction |
+| 10 | thumb opposition | SG90 | PCA ch 0 | 0–180 | 90 | >90 = toward pinky |
 | 11 | elbow roll (pron/sup) | NEMA 17, 4:1 | A4988 | signed deg | 0 | + = pronation, − = supination |
 | 12 | elbow extension | NEMA 17, 64:1 | TMC2209 | signed deg | 0 | + = extension, − = retraction |
 
-**Axis index does not equal PCA channel.** The finger+wrist bank (indices 0–5)
-sits on the **last 6** PCA channels (10–15); the splay+opposition bank (indices
-6–10) sits on the **first 5** (0–4). PCA ch 5–9 are an unused spare gap in the
-middle. See `AXIS_TO_PCA` in `firmware/src/main.cpp`, the one place that knows
-the axis-index-to-channel mapping. If a servo moves to a different channel,
+**Axis index does not equal PCA channel.** Wiring order on the board, ch 0–10:
+thumb opposition, index/middle/ring/pinky splay, wrist, thumb/index/middle/
+ring/pinky flex. Ch 11–15 are unused. Bench-confirmed 2026-08-09 -- see
+`AXIS_TO_PCA` in `firmware/src/main.cpp`, the one place that knows the
+axis-index-to-channel mapping. If a servo moves to a different channel,
 update that table.
+
+### 2.1 Power architecture (as-built, confirmed 2026-08-09)
+
+A single 4S LiPo (14.8 V nominal) powers the whole arm. It is **not** wired
+directly to the servos or logic:
+
+- **Steppers** run off the 4S rail directly -- both driver boards are rated
+  well above it (29 V / 35 V max, see 2.2).
+- **Servos** are fed through a buck converter to a terminal block, stepped
+  down to the servos' actual rated voltage, before reaching the PCA9685's V+
+  pins. The PCA9685's signal pins carry PWM only, no power.
+- **ESP32 logic** gets its own properly regulated supply, separate from the
+  above.
+
+Resolves the earlier BOM note about a 3S/4S conflict -- the pack is 4S; the
+servo and logic rails are regulated down from it, not run raw.
 
 ### 2.2 Stepper hardware (as-built)
 
@@ -89,12 +105,12 @@ Clamped in firmware, applied last, after every other stage. No source can exceed
 
 | Idx | Min | Max | Notes |
 |----|-----|-----|-------|
-| 0–4 | TBD | TBD | tendon over-pull risk at the closed end |
-| 5 | TBD | TBD | |
-| 6–9 | TBD | TBD | splay servos have little travel; find the mechanical stops first |
-| 10 | TBD | TBD | |
+| 0–4 | 0 | 180 | full sweep by choice 2026-08-09; tendon over-pull risk at the closed end not yet bench-verified -- watch the first slow close |
+| 5 | 40 | 140 | bench-confirmed 2026-08-09 |
+| 6–9 | 70 | 110 | 90 ± 20, locked around neutral -- see §2 axis table |
+| 10 | 40 | 140 | bench-confirmed 2026-08-09 |
 | 11 | −80 | +80 | wiring twist limit — do not raise without a service-loop check |
-| 12 | TBD | TBD | set from hard stops |
+| 12 | −90 | +90 | bench-confirmed 2026-08-09, symmetric around zero to hard stop |
 
 ---
 
@@ -163,6 +179,14 @@ axis table, including both steppers.
 `grasp_id` refers to the Feix et al. (2016) GRASP taxonomy index where the preset
 corresponds to one, otherwise null. This is what makes the preset library double as
 the dexterity test battery.
+
+**Don't-care axes.** Most hand-shape presets have no opinion about the elbow.
+`NAN` in an axis slot means "leave this axis wherever it currently is" --
+firmware skips it entirely rather than commanding a value (`main.cpp`, see `DC`
+in `PRESETS[]` and the check in `applyPreset()`). Only presets that need a
+specific elbow pose (e.g. `prismatic wrap`) set axes 11/12 to real numbers;
+every other preset marks them `NAN` so recalling a hand shape never yanks the
+elbow back to 0/0.
 
 Preset recall is a **motion, not an assignment.** Servos arrive in tens of
 milliseconds; a 90° move on the 64:1 elbow is roughly 3,200 full steps and takes
@@ -303,12 +327,12 @@ Switching to CV mode force-stops any active jog.
 
 ## 9. Open items
 
-- [ ] All **TBD** limits, from bench testing
-- [ ] Confirm the provisional PCA channel map
+- [x] All **TBD** axis limits, from bench testing -- see §2.1, all set 2026-08-09
+- [x] Confirm the provisional PCA channel map -- bench-confirmed 2026-08-09
 - [ ] Re-author the 8 existing presets as 13-value arrays
-- [ ] Decide whether presets carry a per-axis "don't care" marker, so a grasp preset
-      can shape the hand without commanding the elbow
-- [ ] Resolve the 3S / 4S LiPo conflict between the BOM and the as-built architecture
+- [x] Decide whether presets carry a per-axis "don't care" marker -- yes, `NAN`
+      sentinel, see §4
+- [x] Resolve the 3S / 4S LiPo conflict between the BOM and the as-built architecture -- see §2.1
 - [ ] Hard-stop homing routine for axis 12
 
 ---

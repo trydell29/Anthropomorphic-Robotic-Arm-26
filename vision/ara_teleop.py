@@ -101,6 +101,13 @@ OPP_RANGE_DEG = 35.0
 
 SMOOTH = 0.35                  # per-channel EMA, 0 = raw
 
+# EMA alone still lets small-amplitude landmark noise through as constant
+# 1-degree twitch once rounded for the wire. Quantizing what's actually sent
+# to steps of this size means noise below half a step never changes the
+# transmitted value at all. Purely a transport-side thing -- the internal
+# EMA state stays float, only the UDP payload is stepped.
+QUANTIZE_STEP_DEG = 2.0
+
 # ===========================================================================
 # LANDMARK INDICES
 # ===========================================================================
@@ -184,6 +191,10 @@ def deadband(x, band):
     if abs(x) < band:
         return 0.0
     return x - math.copysign(band, x)
+
+
+def quantize(x, step):
+    return round(x / step) * step
 
 
 def palm_frame(w):
@@ -477,7 +488,7 @@ def main():
                 now = time.time()
                 if sending and now - last_send >= 1.0 / SEND_HZ:
                     seq = (seq + 1) & 0xFFFF
-                    vals = ",".join(str(int(round(v))) for v in smoothed)
+                    vals = ",".join(str(int(quantize(v, QUANTIZE_STEP_DEG))) for v in smoothed)
                     sock.sendto(f"ARA,{seq},{vals}\n".encode(), ESP_ADDR)
                     last_send = now
         else:

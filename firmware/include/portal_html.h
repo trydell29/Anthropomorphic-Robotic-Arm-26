@@ -190,7 +190,7 @@ button.b:focus-visible{outline:2px solid var(--live);outline-offset:1px}
   <div class="shead"><h2>Hand</h2><span class="note">servos on the PCA9685</span>
     <label style="margin-left:auto;display:flex;align-items:center;gap:.4rem;
                   font-size:11px;color:var(--dim);cursor:pointer">
-      <input type="checkbox" id="rawTest" onchange="rawTest=this.checked">
+      <input type="checkbox" id="rawTest" onchange="onRawToggle(this.checked)">
       full 0&ndash;180 sweep (ignore this axis's assumed limits)
     </label>
   </div>
@@ -281,10 +281,16 @@ function drawPresets(){
     `<button class="b" onclick="preset('${p}')">${p}</button>`).join('');
 }
 
+function servoBounds(i){
+  // rawTest bypasses this axis's assumed AXIS_MIN/AXIS_MAX -- see /axis raw=1.
+  // Otherwise mirror the firmware's actual clamp so the slider can't ask for
+  // something clampAxis() will just silently refuse.
+  return rawTest ? [0,180] : [st.min[i], st.max[i]];
+}
+
 function row(i){
   const stepper=!isServo(i);
-  const min = stepper ? (i===11?-90:-30) : 0;
-  const max = stepper ? (i===11? 90:120) : 180;
+  const [min,max] = stepper ? [st.min[i], st.max[i]] : servoBounds(i);
   const chLabel = isServo(i) ? String(st.pca_ch[i]).padStart(2,'0') : '--';
   return `<div class="axis" id="ax${i}">
     <span class="idx mono" title="PCA9685 channel">${chLabel}</span>
@@ -301,6 +307,16 @@ function row(i){
       <button class="mark" id="hi${i}" onclick="mark(${i},'hi')">hi</button>
     </span>
   </div>`;
+}
+
+function onRawToggle(v){
+  rawTest=v;
+  for(let i=0;i<SERVO_N;i++){
+    const [min,max]=servoBounds(i), sl=el('sl'+i);
+    if(!sl) continue;
+    sl.min=min; sl.max=max;
+  }
+  syncAxes();
 }
 
 function drawAxes(){

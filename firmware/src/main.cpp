@@ -54,44 +54,10 @@ static const char *MDNS_HOST = "ara";
 static const uint32_t STA_TIMEOUT_MS = 8000;
 
 // --- I2C / PCA9685 ---
-static const uint8_t PIN_SDA = 21;        // TBD confirm
-static const uint8_t PIN_SCL = 22;        // TBD confirm
+static const uint8_t PIN_SDA = 21;        // confirmed 2026-08-09 -- board runs, PCA9685 responds
+static const uint8_t PIN_SCL = 22;        // confirmed 2026-08-09 -- board runs, PCA9685 responds
 static const uint8_t PCA_ADDR = 0x40;
 static const float   PCA_FREQ_HZ = 50.0f;
-
-// --- Stepper pins -- SUPERSEDED 2026-08-04 ---
-// Repo originally assumed two identical TMC2209s sharing one pin/geometry
-// config and EN tied to GND. As-built, the two axes use different driver
-// ICs on different pins, each with its own active-low EN line. Kept for
-// history; not read by any code below. See StepperAxisConfig / EXT_CFG /
-// ROLL_CFG for the values actually in effect.
-static const uint8_t PIN_ROLL_STEP = 26;
-static const uint8_t PIN_ROLL_DIR  = 25;
-static const uint8_t PIN_EXT_STEP  = 33;
-static const uint8_t PIN_EXT_DIR   = 32;
-// EN is tied to GND on both drivers -- no enable pin in software.
-
-// --- Stepper geometry -- SUPERSEDED 2026-08-04 ---
-// MICROSTEPS was a shared TBD guess (8) applied to both axes via one
-// gear-ratio parameter. As-built, both drivers turned out to be strapped
-// for 1/16 (a coincidence, not a shared config), but they're on different
-// pins with different EN lines, so each axis now carries its own full
-// config rather than sharing these globals. Kept for history; not read by
-// any code below.
-static const float STEPS_PER_REV = 200.0f;   // 1.8 deg NEMA 17
-static const float MICROSTEPS    = 8.0f;     // TBD confirm MS1/MS2 straps
-static const float GEAR_ROLL     = 4.0f;     // pron/sup planetary
-static const float GEAR_EXT      = 64.0f;    // elbow planetary
-
-// --- Motion limits -- SUPERSEDED 2026-08-04 ---
-// Folded into speedHz/accel in EXT_CFG/ROLL_CFG below (same values carried
-// over). Kept for history; not read by any code below.
-// The 64:1 axis is slow by construction -- do not chase it with more
-// acceleration, a printed planetary will skip and lose the zero.
-static const uint32_t ROLL_SPEED_HZ = 4000;
-static const uint32_t ROLL_ACCEL    = 8000;
-static const uint32_t EXT_SPEED_HZ  = 6000;
-static const uint32_t EXT_ACCEL     = 6000;
 
 // --- Stepper driver config (as-built 2026-08-04) ---
 // Two DIFFERENT driver ICs -- not two of the same board:
@@ -171,8 +137,9 @@ static const uint8_t SERVO_COUNT    = 11;  // 11 servos, spread over PCA ch 0..1
 
 // Axis index -> PCA9685 channel. Wiring order on the board, ch 0-10:
 // thumb opp, index/middle/ring/pinky splay, wrist,
-// thumb/index/middle/ring/pinky flex. If a servo moves to a different
-// channel, update this table -- it is the only place that knows the mapping.
+// thumb/index/middle/ring/pinky flex. Bench-confirmed 2026-08-09 -- each
+// axis moves only its own servo. If a servo moves to a different channel,
+// update this table -- it is the only place that knows the mapping.
 static const uint8_t AXIS_TO_PCA[SERVO_COUNT] = {
   6, 7, 8, 9, 10,     // thumb/index/middle/ring/pinky flex
   5,                  // wrist
@@ -201,22 +168,24 @@ static const char *AXIS_NAME[AXIS_COUNT] = {
 };
 
 // Limits.  Applied last, after every other stage.  No source may exceed them.
-// TBD: everything except the roll pair, which is a wiring-twist limit.
+// All bench-confirmed 2026-08-09 except fingers (0-4, full sweep by choice --
+// tendon over-pull at full close not yet verified) and roll, which is a
+// wiring-twist limit rather than a bench measurement.
 static const float AXIS_MIN[AXIS_COUNT] = {
     0,   0,   0,   0,   0,     // finger flexion
-   40,                         // wrist        TBD
-   60,  60,  60,  60,          // splay        TBD
-   40,                         // thumb opp    TBD
+   40,                         // wrist        bench-confirmed 2026-08-09
+   70,  70,  70,  70,          // splay        90 +/- 20, locked around AXIS_NEUTRAL
+   40,                         // thumb opp    bench-confirmed 2026-08-09
   -80,                         // elbow roll   service-loop limit
-  -20                          // elbow ext    TBD from hard stop
+  -90                          // elbow ext    bench-confirmed 2026-08-09, +/-90 from zero to hard stop
 };
 static const float AXIS_MAX[AXIS_COUNT] = {
   180, 180, 180, 180, 180,
   140,
-  120, 120, 120, 120,
+  110, 110, 110, 110,
   140,
   +80,
-  +110
+  +90
 };
 
 static const float AXIS_NEUTRAL[AXIS_COUNT] = {
@@ -240,16 +209,21 @@ struct Preset {
   float v[AXIS_COUNT];
 };
 
+// NAN in an axis slot means "don't care" -- applyPreset() leaves that axis
+// wherever it already is instead of commanding it. Lets a hand-shape preset
+// avoid yanking the elbow to 0/0 when it doesn't need a specific elbow pose.
+static constexpr float DC = NAN;
+
 static const Preset PRESETS[] = {
   // name              id    thF  idF  mdF  rgF  pkF   wr   idS  mdS  rgS  pkS  thO  roll  ext
-  { "open",            -1, { 180, 180, 180, 180, 180,  90,   90,  90,  90,  90,  90,    0,   0 } },
-  { "fist",            -1, {   0,   0,   0,   0,   0,  90,   90,  90,  90,  90,  90,    0,   0 } },
-  { "point",           -1, {   0, 180,   0,   0,   0,  90,   90,  90,  90,  90,  90,    0,   0 } },
-  { "pinch",            9, {  40, 40,  180, 180, 180,  90,   90,  90,  90,  90, 130,    0,   0 } },
-  { "tripod",          10, {  40, 40,   40, 180, 180,  90,   90,  90,  90,  90, 130,    0,   0 } },
-  { "lateral",         16, {  60,   0,   0,   0,   0,  90,   90,  90,  90,  90, 110,    0,   0 } },
+  { "open",            -1, { 180, 180, 180, 180, 180,  90,   90,  90,  90,  90,  90,   DC,  DC } },
+  { "fist",            -1, {   0,   0,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
+  { "point",           -1, {   0, 180,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
+  { "pinch",            9, {  40, 40,  180, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
+  { "tripod",          10, {  40, 40,   40, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
+  { "lateral",         16, {  60,   0,   0,   0,   0,  90,   90,  90,  90,  90, 110,   DC,  DC } },
   { "prismatic wrap",  12, {  20,  20,  20,  25,  30,  95,   90,  90,  90,  90, 140,   15,  40 } },
-  { "spread",          -1, { 180, 180, 180, 180, 180,  90,  120, 100,  80,  60,  90,    0,   0 } },
+  { "spread",          -1, { 180, 180, 180, 180, 180,  90,  120, 100,  80,  60,  90,   DC,  DC } },
 };
 static const uint8_t PRESET_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -329,19 +303,6 @@ static inline float smoothstep(float t) {
   if (t <= 0.0f) return 0.0f;
   if (t >= 1.0f) return 1.0f;
   return t * t * (3.0f - 2.0f * t);
-}
-
-// SUPERSEDED 2026-08-04: took a shared gear ratio and read the shared
-// STEPS_PER_REV/MICROSTEPS globals above, which assumed both axes ran the
-// same microstepping. Kept for history; not called below. See
-// degToStepsAxis(), which takes a precomputed per-axis steps-per-degree
-// instead (EXT_STEPS_PER_DEG / ROLL_STEPS_PER_DEG).
-static inline int32_t degToSteps(float deg, float gear) {
-  return (int32_t)lroundf(deg * (STEPS_PER_REV * MICROSTEPS * gear) / 360.0f);
-}
-
-static inline float stepsToDeg(int32_t steps, float gear) {
-  return (float)steps * 360.0f / (STEPS_PER_REV * MICROSTEPS * gear);
 }
 
 static inline int32_t degToStepsAxis(float deg, float stepsPerDeg) {
@@ -462,6 +423,7 @@ static void enterManual() {
 
 static void applyPreset(const Preset &p) {
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    if (isnan(p.v[i])) continue;   // DC: leave this axis wherever it is
     target[i] = clampAxis(i, p.v[i]);
     if (i < SERVO_COUNT) axisTouched[i] = true;
   }
