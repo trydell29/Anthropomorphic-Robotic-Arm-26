@@ -181,6 +181,15 @@ button.b:focus-visible{outline:2px solid var(--live);outline-offset:1px}
 </header>
 
 <section>
+  <div class="shead"><h2>Program pose</h2>
+    <span class="note">MANUAL mode only &mdash; steppers are not touched, zero them by hand first</span></div>
+  <div class="btns">
+    <button class="b" id="btnStart" onclick="startPose()">Start</button>
+  </div>
+  <p class="hint" id="poseNote">loading&hellip;</p>
+</section>
+
+<section>
   <div class="shead"><h2>Grasps</h2>
     <span class="note">recall is a motion, not a jump &mdash; steppers take seconds</span></div>
   <div class="btns" id="presets"><span class="empty">loading</span></div>
@@ -268,6 +277,9 @@ function render(){
   el('sBad').innerHTML='malformed <b>'+st.malformed+'</b>';
   const jogging = st.roll_jogging || st.ext_jogging;
   el('sMot').textContent = jogging ? 'jogging' : (st.roll_running||st.ext_running) ? 'moving' : '';
+
+  el('btnStart').disabled = cv;
+  el('poseNote').textContent = poseNoteText();
 
   if(el('presets').firstElementChild.tagName!=='BUTTON') drawPresets();
   if(!el('handAxes').querySelector('.axis')) drawAxes();
@@ -368,6 +380,12 @@ function askCv(){
   if(confirm('Switching to vision lowers the elbow to its zero over several seconds. Anything the hand is holding goes with it.\n\nContinue?')) setMode('CV');
 }
 function preset(n){ lastSent={}; post('/preset','name='+encodeURIComponent(n)); }
+function startPose(){ lastSent={}; post('/neutral',''); }
+function poseNoteText(){
+  const parts=[];
+  for(let i=0;i<SERVO_N;i++) parts.push(st.names[i].replace(/_/g,' ')+' '+Math.round(st.neutral[i])+'\u00B0');
+  return parts.join(', ');
+}
 function zeroAxis(i){
   const n=st?st.names[i].replace(/_/g,' '):'axis '+i;
   if(confirm('Declare the current physical position of '+n+' to be zero?\n\nEvery preset is measured from here.')) post('/zero','axis='+i);

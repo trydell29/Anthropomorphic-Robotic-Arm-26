@@ -159,6 +159,20 @@ static const float SERVO_MAX_DEG_PER_S[SERVO_COUNT] = {
   0                   // thumb opp     -- unlimited
 };
 
+// Physical output direction per servo. true flips the pulse so that target[]'s
+// 0=closed / 180=open convention (see AXIS_MIN/MAX comments above and
+// AXIS_NEUTRAL's "fingers open" at 180) still holds at the horn even when the
+// servo itself moves the opposite way. Confirmed on the bench 2026-08-11: all
+// five flex servos now open at 0 and close at 180 -- reversed from every
+// other assumption in this file (presets, AXIS_NEUTRAL, PROTOCOL.md) -- so
+// invert here, once, rather than flip the sign convention everywhere else.
+static const bool SERVO_INVERT[SERVO_COUNT] = {
+  true, true, true, true, true,    // thumb/index/middle/ring/pinky flex -- reversed
+  false,                           // wrist
+  false, false, false, false,      // splay
+  false                            // thumb opp
+};
+
 static const char *AXIS_NAME[AXIS_COUNT] = {
   "thumb_flex", "index_flex", "middle_flex", "ring_flex", "pinky_flex",
   "wrist",
@@ -170,20 +184,22 @@ static const char *AXIS_NAME[AXIS_COUNT] = {
 // Limits.  Applied last, after every other stage.  No source may exceed them.
 // All bench-confirmed 2026-08-09 except fingers (0-4, full sweep by choice --
 // tendon over-pull at full close not yet verified) and roll, which is a
-// wiring-twist limit rather than a bench measurement.
+// wiring-twist limit rather than a bench measurement. Splay and thumb opp
+// (6-9, 10) were opened to full 0-180 on 2026-08-10 for jog testing, then
+// narrowed to these bench-tested ranges the same day.
 static const float AXIS_MIN[AXIS_COUNT] = {
     0,   0,   0,   0,   0,     // finger flexion
-   40,                         // wrist        bench-confirmed 2026-08-09
-   70,  70,  70,  70,          // splay        90 +/- 20, locked around AXIS_NEUTRAL
-   40,                         // thumb opp    bench-confirmed 2026-08-09
+   45,                         // wrist        90 +/- 45
+  160, 160,   0,   0,          // splay        index/middle 160-180, ring/pinky 0-20
+    0,                         // thumb opp    0-160
   -80,                         // elbow roll   service-loop limit
   -90                          // elbow ext    bench-confirmed 2026-08-09, +/-90 from zero to hard stop
 };
 static const float AXIS_MAX[AXIS_COUNT] = {
   180, 180, 180, 180, 180,
-  140,
-  110, 110, 110, 110,
-  140,
+  135,
+  180, 180,  20,  20,
+  160,
   +80,
   +90
 };
@@ -191,8 +207,8 @@ static const float AXIS_MAX[AXIS_COUNT] = {
 static const float AXIS_NEUTRAL[AXIS_COUNT] = {
   180, 180, 180, 180, 180,     // fingers open
    90,                         // wrist neutral
-   90,  90,  90,  90,          // splay neutral
-   90,                         // thumb opp neutral
+  180, 170,   0,   0,          // splay start: index 180, middle 170, ring/pinky 0
+    0,                         // thumb opp start: 0
     0,                         // roll zero
     0                          // ext zero
 };
@@ -216,14 +232,14 @@ static constexpr float DC = NAN;
 
 static const Preset PRESETS[] = {
   // name              id    thF  idF  mdF  rgF  pkF   wr   idS  mdS  rgS  pkS  thO  roll  ext
-  { "open",            -1, { 180, 180, 180, 180, 180,  90,   90,  90,  90,  90,  90,   DC,  DC } },
+  { "open",            -1, { 180, 180, 180, 180, 180,  90,   90,  90,  90,  90,   0,   DC,  DC } },
   { "fist",            -1, {   0,   0,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
   { "point",           -1, {   0, 180,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
   { "pinch",            9, {  40, 40,  180, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
   { "tripod",          10, {  40, 40,   40, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
   { "lateral",         16, {  60,   0,   0,   0,   0,  90,   90,  90,  90,  90, 110,   DC,  DC } },
   { "prismatic wrap",  12, {  20,  20,  20,  25,  30,  95,   90,  90,  90,  90, 140,   15,  40 } },
-  { "spread",          -1, { 180, 180, 180, 180, 180,  90,  120, 100,  80,  60,  90,   DC,  DC } },
+  { "spread",          -1, { 180, 180, 180, 180, 180,  90,  120, 100,  80,  60,   0,   DC,  DC } },
 };
 static const uint8_t PRESET_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
@@ -339,6 +355,7 @@ static inline bool seqIsNewer(uint16_t s, uint16_t last) {
 }
 
 static void writeServo(uint8_t axis, float deg) {
+  if (SERVO_INVERT[axis]) deg = 180.0f - deg;
   float t = deg / 180.0f;
   if (t < 0.0f) t = 0.0f;
   if (t > 1.0f) t = 1.0f;
@@ -571,6 +588,11 @@ static String stateJson() {
     if (i) s += ",";
     s += String(AXIS_MAX[i], 0);
   }
+  s += "],\"neutral\":[";
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
+    if (i) s += ",";
+    s += String(AXIS_NEUTRAL[i], 0);
+  }
   s += "],\"names\":[";
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
@@ -611,11 +633,11 @@ static void setupRoutes() {
     float v = r->getParam("value", true)->value().toFloat();
     if (idx < 0 || idx >= AXIS_COUNT) { r->send(400, "text/plain", "bad idx"); return; }
     // raw=1: bench-test escape hatch for servo axes only. Ignores this
-    // axis's assumed AXIS_MIN/AXIS_MAX (e.g. splay's narrower 60-120) and
-    // just constrains to the servo's physical 0-180 sweep -- for sorting
-    // out which physical servo landed on which logical axis without
-    // fighting per-axis limits that may not even apply to what's actually
-    // wired there right now.
+    // axis's assumed AXIS_MIN/AXIS_MAX (e.g. wrist's narrower 40-140
+    // range) and just constrains to the servo's physical 0-180 sweep --
+    // for sorting out which physical servo landed on which logical axis
+    // without fighting per-axis limits that may not even apply to what's
+    // actually wired there right now.
     bool raw = r->hasParam("raw", true) && idx < SERVO_COUNT;
     target[idx] = raw ? constrain(v, 0.0f, 180.0f) : clampAxis((uint8_t)idx, v);
     if (idx < SERVO_COUNT) axisTouched[idx] = true;
@@ -635,6 +657,19 @@ static void setupRoutes() {
       }
     }
     r->send(404, "text/plain", "no such preset");
+  });
+
+  // POST /neutral  -- drive every servo axis to its AXIS_NEUTRAL pose.
+  // Servo axes only (0..SERVO_COUNT-1): the steppers (roll/ext) are zeroed
+  // by hand on the bench, so this deliberately never touches target[11]/[12].
+  server.on("/neutral", HTTP_POST, [](AsyncWebServerRequest *r) {
+    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
+    for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+      target[i] = clampAxis(i, AXIS_NEUTRAL[i]);
+      axisTouched[i] = true;
+    }
+    rampActive = false;   // pose recall retargets, it does not queue
+    r->send(200, "application/json", stateJson());
   });
 
   // POST /mode?mode=CV

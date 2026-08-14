@@ -302,9 +302,14 @@ def to_channels(raw, calib, last, frozen_flags):
             d = raw["splay"][i] - calib.splay[i]
             ch[6 + i] = remap(d, -SPLAY_RANGE_DEG, SPLAY_RANGE_DEG, 0.0, 180.0)
 
-    # 10 thumb opposition
+    # 10 thumb opposition -- one-directional, not a midpoint. Firmware's
+    # AXIS_NEUTRAL[10] is 0 (thumb away from palm, bench-confirmed
+    # 2026-08-11), not the old 90, and the calibrated flat/neutral pose is
+    # that same "away" position, so d has nowhere to go below 0: only
+    # rotating the thumb toward the palm should move the axis, up to the
+    # bench-confirmed AXIS_MAX[10] of 160.
     d = raw["opp"] - calib.opp
-    ch[10] = remap(d, -OPP_RANGE_DEG, OPP_RANGE_DEG, 0.0, 180.0)
+    ch[10] = remap(d, 0.0, OPP_RANGE_DEG, 0.0, 160.0)
 
     # 5 wrist flexion/extension
     if raw["wrist"] is None:
