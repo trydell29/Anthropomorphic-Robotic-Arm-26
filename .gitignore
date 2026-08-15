@@ -14,26 +14,6 @@ wifi_secrets.h
 .idea/
 *.swp
 
-# --- Python / vision host ---
-__pycache__/
-*.py[cod]
-venv/
-.venv/
-env/
-*.egg-info/
-
-# --- MediaPipe models -----------------------------------------------------
-# These are multi-megabyte binaries. Do NOT commit them. The README carries
-# the curl commands to fetch them.
-*.task
-*.tflite
-
-# --- Calibration / runtime artifacts --------------------------------------
-# Calibration is per-operator and per-camera. Committing it means someone
-# else's neutral pose silently becomes yours.
-calibration.json
-*.local.json
-
 # --- OS junk ---
 .DS_Store
 Thumbs.db

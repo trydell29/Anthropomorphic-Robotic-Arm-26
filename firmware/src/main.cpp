@@ -1,20 +1,15 @@
 // ============================================================================
 // ARA - Anthropomorphic Robotic Arm
-// On-arm ESP32 firmware.  Implements docs/PROTOCOL.md v0.1.
+// On-arm ESP32 firmware. Implements docs/PROTOCOL.md.
 //
-// Responsibilities, in order of importance:
-//   1. Own the authoritative 13-axis target array.  Nothing else commands an
-//      actuator.
-//   2. Arbitrate between two writers: the UDP vision stream and the portal.
-//   3. Clamp everything, always, as the last step before output.
-//
-// Everything marked TBD must be set from bench testing before running CV.
+// Standalone manual controller: hosts a captive-portal web UI with one slider
+// per axis and a per-stepper zero (calibration) button. Nothing else writes
+// the target array.
 // ============================================================================
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
-#include <AsyncUDP.h>
 #include <ESPmDNS.h>
 #include <ESPAsyncWebServer.h>
 
@@ -40,11 +35,10 @@
 // --- Network ---
 static const char *AP_SSID = "ARA-HAND";
 static const char *AP_PASS = "";          // open network; see README before changing
-static const uint16_t UDP_PORT = 4210;
 
 // Dual mode. The softAP is always up -- that is what the arm ships with and what
-// the Pi joins in the field. If STA credentials exist, the board ALSO joins that
-// network, so during development your laptop keeps its internet and you can
+// the operator joins in the field. If STA credentials exist, the board ALSO joins
+// that network, so during development your laptop keeps its internet and you can
 // reach the board at http://ara.local without switching WiFi.
 //
 // Caveat worth knowing: an ESP32 cannot run AP and STA on different channels.
@@ -109,8 +103,6 @@ static constexpr float ROLL_STEPS_PER_DEG = axisStepsPerDeg(ROLL_CFG);
 
 // --- Timing ---
 static const uint32_t CONTROL_PERIOD_MS = 20;    // 50 Hz output tick
-static const uint32_t WATCHDOG_MS       = 400;   // PROTOCOL section 3.2
-static const uint32_t RAMP_MS           = 300;   // CV entry ramp
 
 // --- Servo pulse range (microseconds) ---
 // MG996R and SG90 both tolerate 500-2500.  Narrow per-servo if a joint
@@ -132,8 +124,7 @@ enum AxisIdx : uint8_t {
   AXIS_COUNT    = 13
 };
 
-static const uint8_t CV_AXIS_COUNT  = 12;  // UDP carries 0..11
-static const uint8_t SERVO_COUNT    = 11;  // 11 servos, spread over PCA ch 0..15
+static const uint8_t SERVO_COUNT = 11;  // 11 servos, spread over PCA ch 0..15
 
 // Axis index -> PCA9685 channel. Wiring order on the board, ch 0-10:
 // thumb opp, index/middle/ring/pinky splay, wrist,
@@ -164,8 +155,8 @@ static const float SERVO_MAX_DEG_PER_S[SERVO_COUNT] = {
 // AXIS_NEUTRAL's "fingers open" at 180) still holds at the horn even when the
 // servo itself moves the opposite way. Confirmed on the bench 2026-08-11: all
 // five flex servos now open at 0 and close at 180 -- reversed from every
-// other assumption in this file (presets, AXIS_NEUTRAL, PROTOCOL.md) -- so
-// invert here, once, rather than flip the sign convention everywhere else.
+// other assumption in this file (AXIS_NEUTRAL, PROTOCOL.md) -- so invert
+// here, once, rather than flip the sign convention everywhere else.
 static const bool SERVO_INVERT[SERVO_COUNT] = {
   true, true, true, true, true,    // thumb/index/middle/ring/pinky flex -- reversed
   false,                           // wrist
@@ -214,79 +205,17 @@ static const float AXIS_NEUTRAL[AXIS_COUNT] = {
 };
 
 // ============================================================================
-// PRESETS  -- 13 values each, PROTOCOL.md section 4.
-// grasp_id refers to Feix et al. (2016); -1 where none applies.
-// All values below are PLACEHOLDERS.  Re-author from the bench.
-// ============================================================================
-
-struct Preset {
-  const char *name;
-  int8_t grasp_id;
-  float v[AXIS_COUNT];
-};
-
-// NAN in an axis slot means "don't care" -- applyPreset() leaves that axis
-// wherever it already is instead of commanding it. Lets a hand-shape preset
-// avoid yanking the elbow to 0/0 when it doesn't need a specific elbow pose.
-static constexpr float DC = NAN;
-
-static const Preset PRESETS[] = {
-  // name              id    thF  idF  mdF  rgF  pkF   wr   idS  mdS  rgS  pkS  thO  roll  ext
-  { "open",            -1, { 180, 180, 180, 180, 180,  90,   90,  90,  90,  90,   0,   DC,  DC } },
-  { "fist",            -1, {   0,   0,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
-  { "point",           -1, {   0, 180,   0,   0,   0,  90,   90,  90,  90,  90,  90,   DC,  DC } },
-  { "pinch",            9, {  40, 40,  180, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
-  { "tripod",          10, {  40, 40,   40, 180, 180,  90,   90,  90,  90,  90, 130,   DC,  DC } },
-  { "lateral",         16, {  60,   0,   0,   0,   0,  90,   90,  90,  90,  90, 110,   DC,  DC } },
-  { "prismatic wrap",  12, {  20,  20,  20,  25,  30,  95,   90,  90,  90,  90, 140,   15,  40 } },
-  { "spread",          -1, { 180, 180, 180, 180, 180,  90,  120, 100,  80,  60,   0,   DC,  DC } },
-};
-static const uint8_t PRESET_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
-
-// ============================================================================
 // STATE
 // ============================================================================
 
-enum Mode : uint8_t { MODE_MANUAL = 0, MODE_CV = 1 };
-
-static volatile Mode mode = MODE_MANUAL;
-
 static float target[AXIS_COUNT];       // authoritative, post-clamp
-static float rampFrom[AXIS_COUNT];     // snapshot for the CV entry ramp
-static bool  rampActive = false;
-static uint32_t rampStartMs = 0;
-
-// CV stream health
-static volatile uint32_t lastPacketMs = 0;
-static volatile uint16_t lastSeq = 0;
-static volatile bool     seqValid = false;
-static volatile uint32_t rxCount = 0;
-static volatile uint32_t malformedCount = 0;
-static volatile uint32_t staleDropCount = 0;
-
-// Values the UDP callback writes; the control loop consumes them.
-static volatile float cvPending[CV_AXIS_COUNT];
-static volatile bool  cvHasNew = false;
-
-static bool switching = false;   // manual->CV, waiting on elbow return
-
-// Bench jog: continuous run at an operator-chosen speed/direction, for
-// verifying wiring/microstepping/gear direction before trusting normal
-// position control. While active for an axis, controlTick() skips that
-// axis's moveTo() entirely -- see JOG_SPEED_MIN_HZ/MAX_HZ below. There is
-// NO position limit while jogging, only the operator's stop button.
-static bool jogRollActive = false;
-static bool jogExtActive  = false;
-static const uint32_t JOG_SPEED_MIN_HZ = 100;
-static const uint32_t JOG_SPEED_MAX_HZ = 8000;
 
 // Servos have no position feedback -- PCA9685 is pure output, MG996R/SG90/
 // AGFRC have no telemetry line. Firmware cannot know where a servo actually
 // is, so it doesn't guess: a channel is only driven once something
-// explicitly commands that specific axis (portal slider, preset, or CV).
-// Until then it gets no PWM at all, rather than snapping to AXIS_NEUTRAL at
-// boot. Set wherever target[] is explicitly written for a servo axis; see
-// /axis, applyPreset(), and the CV branch of controlTick().
+// explicitly commands that specific axis (a portal slider). Until then it
+// gets no PWM at all, rather than snapping to AXIS_NEUTRAL at boot. Set
+// wherever target[] is explicitly written for a servo axis; see /axis.
 static bool axisTouched[SERVO_COUNT] = {false};
 
 // Slew-limited output state -- see SERVO_MAX_DEG_PER_S. servoPos[i] is the
@@ -303,7 +232,6 @@ FastAccelStepperEngine engine = FastAccelStepperEngine();
 FastAccelStepper *stepRoll = nullptr;
 FastAccelStepper *stepExt  = nullptr;
 AsyncWebServer server(80);
-AsyncUDP udp;
 
 // ============================================================================
 // HELPERS
@@ -315,18 +243,8 @@ static inline float clampAxis(uint8_t i, float v) {
   return v;
 }
 
-static inline float smoothstep(float t) {
-  if (t <= 0.0f) return 0.0f;
-  if (t >= 1.0f) return 1.0f;
-  return t * t * (3.0f - 2.0f * t);
-}
-
 static inline int32_t degToStepsAxis(float deg, float stepsPerDeg) {
   return (int32_t)lroundf(deg * stepsPerDeg);
-}
-
-static inline float stepsToDegAxis(int32_t steps, float stepsPerDeg) {
-  return (float)steps / stepsPerDeg;
 }
 
 // Attaches one stepper axis from its StepperAxisConfig. Both drivers are
@@ -349,11 +267,6 @@ static FastAccelStepper *attachAxis(const StepperAxisConfig &cfg, const char *la
   return s;
 }
 
-// Wrap-safe sequence comparison.  PROTOCOL.md section 3.1.
-static inline bool seqIsNewer(uint16_t s, uint16_t last) {
-  return (uint16_t)(s - last) < 32768u;
-}
-
 static void writeServo(uint8_t axis, float deg) {
   if (SERVO_INVERT[axis]) deg = 180.0f - deg;
   float t = deg / 180.0f;
@@ -364,131 +277,12 @@ static void writeServo(uint8_t axis, float deg) {
 }
 
 // ============================================================================
-// UDP  (PROTOCOL.md section 3)
-// Format: ARA,<seq>,<a0>..<a11>\n
-// Partial application is forbidden -- parse fully into a scratch buffer, then
-// commit, or drop the whole packet.
-// ============================================================================
-
-static void handlePacket(AsyncUDPPacket &pkt) {
-  static char buf[192];
-  size_t len = pkt.length();
-  if (len == 0 || len >= sizeof(buf)) { malformedCount++; return; }
-  memcpy(buf, pkt.data(), len);
-  buf[len] = '\0';
-
-  char *save = nullptr;
-  char *tok = strtok_r(buf, ",", &save);
-  if (!tok || strncmp(tok, "ARA", 3) != 0) { malformedCount++; return; }
-
-  tok = strtok_r(nullptr, ",", &save);
-  if (!tok) { malformedCount++; return; }
-  uint16_t seq = (uint16_t)strtoul(tok, nullptr, 10);
-
-  float scratch[CV_AXIS_COUNT];
-  for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) {
-    tok = strtok_r(nullptr, ",\r\n", &save);
-    if (!tok) { malformedCount++; return; }
-    char *end = nullptr;
-    float v = strtof(tok, &end);
-    if (end == tok) { malformedCount++; return; }   // non-numeric
-    scratch[i] = v;
-  }
-
-  if (seqValid && !seqIsNewer(seq, lastSeq)) { staleDropCount++; return; }
-
-  lastSeq = seq;
-  seqValid = true;
-  lastPacketMs = millis();
-  rxCount++;
-
-  for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) cvPending[i] = scratch[i];
-  cvHasNew = true;
-}
-
-// ============================================================================
-// MODE TRANSITIONS  (PROTOCOL.md section 5)
-// ============================================================================
-
-static void enterCV() {
-  if (mode == MODE_CV) return;
-  // A bench jog fighting the CV stream's control of roll (or the
-  // boot-neutral return on ext, below) is not a state worth supporting --
-  // abort outright.
-  if (jogRollActive && stepRoll) { stepRoll->forceStop(); jogRollActive = false; }
-  if (jogExtActive  && stepExt)  { stepExt->forceStop();  jogExtActive  = false; }
-  // Axis 12 is not carried by the stream -- return it to boot zero and park.
-  target[AX_ELBOW_EXT] = 0.0f;
-  if (stepExt) stepExt->moveTo(0);
-  switching = true;
-
-  // Axes 0..11 hold until the first packet, then ramp.
-  for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) rampFrom[i] = target[i];
-  rampActive = false;      // armed on first packet, not now
-  seqValid = false;        // a new session restarts sequence tracking
-  cvHasNew = false;
-  mode = MODE_CV;
-}
-
-static void enterManual() {
-  if (mode == MODE_MANUAL) return;
-  // Targets are inherited from where the arm actually is.  The portal
-  // repopulates its sliders from /state; it must not push its own values.
-  rampActive = false;
-  mode = MODE_MANUAL;
-}
-
-static void applyPreset(const Preset &p) {
-  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-    if (isnan(p.v[i])) continue;   // DC: leave this axis wherever it is
-    target[i] = clampAxis(i, p.v[i]);
-    if (i < SERVO_COUNT) axisTouched[i] = true;
-  }
-  rampActive = false;   // preset recall retargets, it does not queue
-}
-
-// ============================================================================
 // CONTROL TICK
 // ============================================================================
 
 static void controlTick() {
-  uint32_t now = millis();
-
-  if (mode == MODE_CV) {
-    if (cvHasNew) {
-      cvHasNew = false;
-      if (!rampActive && rxCount <= 1) {
-        // First packet of this CV session -- arm the entry ramp.
-        for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) rampFrom[i] = target[i];
-        rampActive = true;
-        rampStartMs = now;
-      }
-      for (uint8_t i = 0; i < CV_AXIS_COUNT; i++) {
-        target[i] = clampAxis(i, cvPending[i]);
-        if (i < SERVO_COUNT) axisTouched[i] = true;
-      }
-    }
-    // Watchdog: hold last values.  Never zero, never open.  A hand full of
-    // MG996Rs snapping to a limit is how tendons and printed parts break.
-    // Nothing to do here -- holding IS doing nothing.  This branch exists so
-    // the behavior is visible in the source rather than implied by absence.
-  }
-
-  // Compose the output frame, applying the entry ramp if active.
   float out[AXIS_COUNT];
-  float k = 1.0f;
-  if (rampActive) {
-    k = smoothstep((float)(now - rampStartMs) / (float)RAMP_MS);
-    if (k >= 1.0f) rampActive = false;
-  }
-  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-    if (rampActive && i < CV_AXIS_COUNT) {
-      out[i] = rampFrom[i] + (target[i] - rampFrom[i]) * k;
-    } else {
-      out[i] = target[i];
-    }
-    out[i] = clampAxis(i, out[i]);
-  }
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) out[i] = clampAxis(i, target[i]);
 
   // Servos 0..10. Only channels that have been explicitly commanded at
   // least once are driven -- see axisTouched above.
@@ -513,66 +307,23 @@ static void controlTick() {
   }
 
   // Steppers.  moveTo is idempotent, so calling every tick is fine.
-  // While a bench jog is active for an axis, skip its moveTo() entirely --
-  // otherwise this would fight runForward()/runBackward() every 20ms. Once
-  // a stopped jog actually settles (isRunning() goes false), resync
-  // target[] to wherever it landed (clamped, same invariant as every other
-  // write to target[]) so normal control resumes from there -- if the jog
-  // went past the normal range, this schedules an ordinary accelerated
-  // moveTo() back inside it on the next tick, not a snap. See /jog.
-  if (stepRoll) {
-    if (jogRollActive) {
-      if (!stepRoll->isRunning()) {
-        target[AX_ELBOW_ROLL] = clampAxis(AX_ELBOW_ROLL,
-            stepsToDegAxis(stepRoll->getCurrentPosition(), ROLL_STEPS_PER_DEG));
-        jogRollActive = false;
-      }
-    } else {
-      stepRoll->moveTo(degToStepsAxis(out[AX_ELBOW_ROLL], ROLL_STEPS_PER_DEG));
-    }
-  }
-  if (stepExt) {
-    if (jogExtActive) {
-      if (!stepExt->isRunning()) {
-        target[AX_ELBOW_EXT] = clampAxis(AX_ELBOW_EXT,
-            stepsToDegAxis(stepExt->getCurrentPosition(), EXT_STEPS_PER_DEG));
-        jogExtActive = false;
-      }
-    } else {
-      stepExt->moveTo(degToStepsAxis(out[AX_ELBOW_EXT], EXT_STEPS_PER_DEG));
-    }
-  }
-
-  if (switching && stepExt && !stepExt->isRunning()) switching = false;
+  if (stepRoll) stepRoll->moveTo(degToStepsAxis(out[AX_ELBOW_ROLL], ROLL_STEPS_PER_DEG));
+  if (stepExt)  stepExt->moveTo(degToStepsAxis(out[AX_ELBOW_EXT],  EXT_STEPS_PER_DEG));
 }
 
 // ============================================================================
 // PORTAL  (PROTOCOL.md section 8)
 // NOTE: this uses query parameters rather than JSON bodies -- simpler on the
-// firmware side and trivially testable with curl.  PROTOCOL.md section 8 must
-// be updated to match.
+// firmware side and trivially testable with curl.
 // ============================================================================
 
 static String stateJson() {
-  uint32_t now = millis();
-  bool stale = (mode == MODE_CV) && (now - lastPacketMs > WATCHDOG_MS);
-
-  String s = "{\"mode\":\"";
-  s += (mode == MODE_CV ? "CV" : "MANUAL");
-  s += "\",\"stale\":";       s += stale ? "true" : "false";
-  s += ",\"switching\":";     s += switching ? "true" : "false";
-  s += ",\"pca\":";           s += pcaPresent ? "true" : "false";
+  String s = "{\"pca\":";        s += pcaPresent ? "true" : "false";
   s += ",\"sta_ip\":\"";
   s += (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
   s += "\"";
-  s += ",\"ramping\":";       s += rampActive ? "true" : "false";
-  s += ",\"rx\":";            s += rxCount;
-  s += ",\"malformed\":";     s += malformedCount;
-  s += ",\"stale_drops\":";   s += staleDropCount;
-  s += ",\"roll_running\":";  s += (stepRoll && stepRoll->isRunning()) ? "true" : "false";
-  s += ",\"ext_running\":";   s += (stepExt  && stepExt->isRunning())  ? "true" : "false";
-  s += ",\"roll_jogging\":";  s += jogRollActive ? "true" : "false";
-  s += ",\"ext_jogging\":";   s += jogExtActive  ? "true" : "false";
+  s += ",\"roll_running\":"; s += (stepRoll && stepRoll->isRunning()) ? "true" : "false";
+  s += ",\"ext_running\":";  s += (stepExt  && stepExt->isRunning())  ? "true" : "false";
   s += ",\"axes\":[";
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
@@ -588,11 +339,6 @@ static String stateJson() {
     if (i) s += ",";
     s += String(AXIS_MAX[i], 0);
   }
-  s += "],\"neutral\":[";
-  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-    if (i) s += ",";
-    s += String(AXIS_NEUTRAL[i], 0);
-  }
   s += "],\"names\":[";
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
@@ -604,11 +350,6 @@ static String stateJson() {
   for (uint8_t i = 0; i < AXIS_COUNT; i++) {
     if (i) s += ",";
     s += (i < SERVO_COUNT) ? String(AXIS_TO_PCA[i]) : String(-1);
-  }
-  s += "],\"presets\":[";
-  for (uint8_t i = 0; i < PRESET_COUNT; i++) {
-    if (i) s += ",";
-    s += "\""; s += PRESETS[i].name; s += "\"";
   }
   s += "]}";
   return s;
@@ -623,9 +364,8 @@ static void setupRoutes() {
     r->send(200, "application/json", stateJson());
   });
 
-  // POST /axis?idx=5&value=95      (manual mode only)
+  // POST /axis?idx=5&value=95
   server.on("/axis", HTTP_POST, [](AsyncWebServerRequest *r) {
-    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
     if (!r->hasParam("idx", true) || !r->hasParam("value", true)) {
       r->send(400, "text/plain", "need idx and value"); return;
     }
@@ -641,44 +381,6 @@ static void setupRoutes() {
     bool raw = r->hasParam("raw", true) && idx < SERVO_COUNT;
     target[idx] = raw ? constrain(v, 0.0f, 180.0f) : clampAxis((uint8_t)idx, v);
     if (idx < SERVO_COUNT) axisTouched[idx] = true;
-    r->send(200, "application/json", stateJson());
-  });
-
-  // POST /preset?name=fist
-  server.on("/preset", HTTP_POST, [](AsyncWebServerRequest *r) {
-    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
-    if (!r->hasParam("name", true)) { r->send(400, "text/plain", "need name"); return; }
-    String n = r->getParam("name", true)->value();
-    for (uint8_t i = 0; i < PRESET_COUNT; i++) {
-      if (n == PRESETS[i].name) {
-        applyPreset(PRESETS[i]);
-        r->send(200, "application/json", stateJson());
-        return;
-      }
-    }
-    r->send(404, "text/plain", "no such preset");
-  });
-
-  // POST /neutral  -- drive every servo axis to its AXIS_NEUTRAL pose.
-  // Servo axes only (0..SERVO_COUNT-1): the steppers (roll/ext) are zeroed
-  // by hand on the bench, so this deliberately never touches target[11]/[12].
-  server.on("/neutral", HTTP_POST, [](AsyncWebServerRequest *r) {
-    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
-    for (uint8_t i = 0; i < SERVO_COUNT; i++) {
-      target[i] = clampAxis(i, AXIS_NEUTRAL[i]);
-      axisTouched[i] = true;
-    }
-    rampActive = false;   // pose recall retargets, it does not queue
-    r->send(200, "application/json", stateJson());
-  });
-
-  // POST /mode?mode=CV
-  server.on("/mode", HTTP_POST, [](AsyncWebServerRequest *r) {
-    if (!r->hasParam("mode", true)) { r->send(400, "text/plain", "need mode"); return; }
-    String m = r->getParam("mode", true)->value();
-    if      (m == "CV")     enterCV();
-    else if (m == "MANUAL") enterManual();
-    else { r->send(400, "text/plain", "bad mode"); return; }
     r->send(200, "application/json", stateJson());
   });
 
@@ -698,44 +400,6 @@ static void setupRoutes() {
     r->send(200, "application/json", stateJson());
   });
 
-  // POST /jog?axis=11&dir=1&speed=2000  -- bench-only: spin continuously.
-  // POST /jog?axis=11&stop=1            -- decelerate; controlTick() hands
-  //                                         the axis back to normal control
-  //                                         once it actually stops.
-  // MANUAL mode only, stepper axes only. Bypasses AXIS_MIN/AXIS_MAX -- this
-  // is deliberately a raw hardware test, not a position command. Speed is
-  // clamped to JOG_SPEED_MIN_HZ..JOG_SPEED_MAX_HZ regardless of what's sent.
-  server.on("/jog", HTTP_POST, [](AsyncWebServerRequest *r) {
-    if (mode != MODE_MANUAL) { r->send(409, "text/plain", "not in MANUAL"); return; }
-    if (!r->hasParam("axis", true)) { r->send(400, "text/plain", "need axis"); return; }
-    int a = r->getParam("axis", true)->value().toInt();
-
-    FastAccelStepper *s = nullptr;
-    bool *active = nullptr;
-    if (a == AX_ELBOW_ROLL)      { s = stepRoll; active = &jogRollActive; }
-    else if (a == AX_ELBOW_EXT)  { s = stepExt;  active = &jogExtActive;  }
-    if (!s || !active) { r->send(400, "text/plain", "axis is not a stepper"); return; }
-
-    if (r->hasParam("stop", true)) {
-      s->stopMove();   // normal deceleration -- see controlTick() for resync
-      r->send(200, "application/json", stateJson());
-      return;
-    }
-
-    if (!r->hasParam("dir", true) || !r->hasParam("speed", true)) {
-      r->send(400, "text/plain", "need dir and speed"); return;
-    }
-    int dir = r->getParam("dir", true)->value().toInt();
-    uint32_t speed = (uint32_t)r->getParam("speed", true)->value().toInt();
-    if (speed < JOG_SPEED_MIN_HZ) speed = JOG_SPEED_MIN_HZ;
-    if (speed > JOG_SPEED_MAX_HZ) speed = JOG_SPEED_MAX_HZ;
-
-    s->setSpeedInHz(speed);
-    *active = true;
-    if (dir >= 0) s->runForward(); else s->runBackward();
-    r->send(200, "application/json", stateJson());
-  });
-
   server.onNotFound([](AsyncWebServerRequest *r) {
     r->redirect("/");
   });
@@ -748,12 +412,9 @@ static void setupRoutes() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\nARA firmware, PROTOCOL v0.1");
+  Serial.println("\nARA firmware");
 
-  for (uint8_t i = 0; i < AXIS_COUNT; i++) {
-    target[i]   = AXIS_NEUTRAL[i];
-    rampFrom[i] = AXIS_NEUTRAL[i];
-  }
+  for (uint8_t i = 0; i < AXIS_COUNT; i++) target[i] = AXIS_NEUTRAL[i];
 
   Wire.begin(PIN_SDA, PIN_SCL);
   // Probe before trusting the board is there. Without this, writeServo() fails
@@ -802,11 +463,6 @@ void setup() {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("mDNS: http://%s.local\n", MDNS_HOST);
   }
-
-  if (udp.listen(UDP_PORT)) {
-    udp.onPacket(handlePacket);
-    Serial.printf("UDP listening on %u\n", UDP_PORT);
-  } else Serial.println("WARN: UDP listen failed");
 
   setupRoutes();
   server.begin();
