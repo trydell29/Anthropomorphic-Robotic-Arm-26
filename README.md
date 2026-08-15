@@ -7,7 +7,7 @@ hardware.
 
 Bergen Community College — STEM Research Center · Summer 2026
 
-![ARA](media/<YOUR_PHOTO_FILENAME>)
+![ARA](media/arminRender.png)
 
 ## What's in here
 
