@@ -1,4 +1,4 @@
- Rights — research documents
+# Rights — research documents
 
 © 2026 Tyler Rydell, Tristan Vallestero, Julia Licameli, Nadia Kim, Semih Coban,
 and Tatiana Jara. Produced at the Bergen Community College STEM Research Center.
