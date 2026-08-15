@@ -17,7 +17,7 @@ Bergen Community College — STEM Research Center · Summer 2026
 | `docs/PROTOCOL.md` | The control protocol — axis table, endpoints, power and stepper wiring. Source of truth. |
 | `docs/` | Research paper, poster, and presentation (PDF). |
 | `cad/` | Full-assembly STEP export + link to the live Onshape model. |
-| `bom-electronics.md` | Informal electronics parts list. |
+| docs/bom.md | Informal electronics parts list. |
 
 ## How it works
 
@@ -30,20 +30,26 @@ map, limits, and wiring are in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 ## Build it
 
 ### Hardware
-See [`bom-electronics.md`](bom-electronics.md) for the electronics, and `cad/`
+See [docs/bom.md](docs/bom.md) for the electronics and `cad/`
 for the mechanical model — the live Onshape document and a STEP export you can
 open or convert (to STL for printing, etc.) in any CAD tool.
 
 ### Firmware — build & flash
 1. Install [PlatformIO](https://platformio.org/) — the VS Code extension is
    easiest (search "PlatformIO IDE" in Extensions).
-2. Clone the repo: git clone https://github.com/trydell29/Studying-the-efficacy-of-Low-Cost-Tendon-Driven-Prosthetics.git
+2. Clone the repo:
+```
+   git clone https://github.com/trydell29/Studying-the-efficacy-of-Low-Cost-Tendon-Driven-Prosthetics.git
+```
 3. In VS Code, open the **`firmware/`** folder. PlatformIO detects
    `platformio.ini` and, on the first build, downloads the pinned libraries
    automatically.
 4. *(Optional, development only)* To also reach the board over your own WiFi at
-   `http://ara.local`, create a secrets file and fill in your 2.4 GHz network: cp firmware/include/Wifi_secrets.example.h firmware/include/wifi_secrets.h
- `wifi_secrets.h` is gitignored and never committed. Skip this and the board
+   `http://ara.local`, create a secrets file and fill in your 2.4 GHz network:
+```
+   cp firmware/include/Wifi_secrets.example.h firmware/include/wifi_secrets.h
+```
+   `wifi_secrets.h` is gitignored and never committed. Skip this and the board
    runs on its own access point alone — which is how the arm operates normally.
 5. Connect the ESP32 by USB, then **Build** (✓) and **Upload** (→) from the
    PlatformIO toolbar.
