@@ -1,4 +1,4 @@
-# ARMin - Studying the Effect of Low-Cost Tendon-Drive Prosthetics
+# ARMin - Studying the Effect of Low-Cost Tendon-Driven Prosthetics
 
 A low-cost, fully 3D-printed, tendon-driven robotic arm — built to test how much
 of a commercial prosthetic hand's dexterity is reachable for roughly $300 in
